@@ -25,6 +25,7 @@
     preloadPages: 3,
     hideShelves: true,
     loadAllWhenFiltered: true,
+    includeShorts: true,
     backoffUntil: 0, // set when YouTube says "too many requests"; shared by all tabs
   };
   let settings = { ...DEFAULTS };
@@ -309,7 +310,15 @@
   // Timeframes: fetching and merging filtered searches
   // ---------------------------------------------------------------------------
 
-  const SP = { hour: 'EgIIAQ==', today: 'EgIIAg==', week: 'EgIIAw==' };
+  // Upload-date filter codes, and the same filters combined with YouTube's
+  // "type: Shorts" filter (in Shorts searches YouTube may include upload dates).
+  const SP = {
+    hour: 'EgIIAQ==', today: 'EgIIAg==', week: 'EgIIAw==',
+    hourShorts: 'EgQIARAJ', todayShorts: 'EgQIAhAJ', weekShorts: 'EgQIAxAJ',
+  };
+  const isShortsSource = src => src.endsWith('Shorts');
+  const sourcesFor = (timeframe, shorts) =>
+    SOURCES[timeframe].flatMap(src => (shorts ? [src, src + 'Shorts'] : [src]));
   // Which filtered searches feed each timeframe (freshest first).
   const SOURCES = { hour: ['hour'], today: ['hour', 'today'], week: ['hour', 'today', 'week'] };
   // Ages must be below these. YouTube rounds down ("1 hour ago" means 60-119
@@ -464,8 +473,10 @@
     const published = txt(r.publishedTimeText);
     const views = txt(r.shortViewCountText) || txt(r.viewCountText);
     const live = /LIVE_NOW|"LIVE"/.test(badges) || (!published && LIVE_RE.test(views));
+    const url = r.navigationEndpoint?.commandMetadata?.webCommandMetadata?.url || '';
     return {
       id: r.videoId,
+      isShort: !!r.navigationEndpoint?.reelWatchEndpoint || url.startsWith('/shorts/'),
       title: txt(r.title),
       channel: txt(r.ownerText) || txt(r.longBylineText),
       views,
@@ -508,6 +519,36 @@
     };
   }
 
+  /** Shorts tiles. YouTube usually gives them no upload date; any short text that reads as one is used. */
+  function fromShort(raw, kind) {
+    let id, title, views, published = '';
+    if (kind === 'reelItemRenderer') {
+      id = raw.videoId;
+      title = txt(raw.headline);
+      views = txt(raw.viewCountText);
+      published = txt(raw.publishedTimeText);
+    } else {
+      id = raw.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId ||
+        (raw.entityId || '').replace(/^shorts-shelf-item-/, '');
+      title = raw.overlayMetadata?.primaryText?.content || '';
+      views = raw.overlayMetadata?.secondaryText?.content || '';
+    }
+    if (!id) return null;
+    let age = parseAge(published);
+    if (age === null) {
+      for (const t of stringsIn(raw)) {
+        if (t === title || t === views || t.length > 25) continue;
+        const a = parseAge(t);
+        if (a !== null) { age = a; published = t; break; }
+      }
+    }
+    return { id, isShort: true, title, channel: '', views, published, length: '', age: age ?? AGE_UNKNOWN };
+  }
+
+  const SHORTS_KEYS = ['reelItemRenderer', 'shortsLockupViewModel'];
+  // In Shorts searches, Shorts come in shelves and grids that must be opened up.
+  const SHORTS_CONTAINERS = new Set(['reelShelfRenderer', 'gridShelfViewModel', 'richShelfRenderer', 'shelfRenderer', 'verticalListRenderer', ...SHORTS_KEYS]);
+
   // Response parts that hold groups or non-videos: never taken apart.
   const SKIP_KEYS = new Set([
     'shelfRenderer', 'reelShelfRenderer', 'richShelfRenderer', 'horizontalCardListRenderer',
@@ -529,11 +570,19 @@
   }
 
   /** Finds videos anywhere inside `obj` (they may sit in wrappers such as YouTube's blur wrapper). */
-  function findVideos(obj, sensitive, out, depth = 0) {
+  function findVideos(obj, sensitive, out, depth = 0, shorts = false) {
     if (!obj || typeof obj !== 'object' || depth > 15) return;
     if (Array.isArray(obj)) {
-      for (const x of obj) findVideos(x, sensitive, out, depth + 1);
+      for (const x of obj) findVideos(x, sensitive, out, depth + 1, shorts);
       return;
+    }
+    if (shorts) {
+      const kind = SHORTS_KEYS.find(k => obj[k]);
+      if (kind) {
+        const v = fromShort(obj[kind], kind);
+        if (v) { v.sensitive = sensitive || hasSensitiveKey(obj[kind]); out.push(v); }
+        return;
+      }
     }
     if (obj.videoRenderer || obj.lockupViewModel) {
       const raw = obj.videoRenderer || obj.lockupViewModel;
@@ -545,13 +594,13 @@
       return;
     }
     for (const [k, v] of Object.entries(obj)) {
-      if (SKIP_KEYS.has(k) || typeof v !== 'object') continue;
-      findVideos(v, sensitive || SENSITIVE_RE.test(k), out, depth + 1);
+      if (typeof v !== 'object' || (SKIP_KEYS.has(k) && !(shorts && SHORTS_CONTAINERS.has(k)))) continue;
+      findVideos(v, sensitive || SENSITIVE_RE.test(k), out, depth + 1, shorts);
     }
   }
 
   /** Pulls video items and the next-page token out of a list of section items. */
-  function collect(items, out) {
+  function collect(items, out, shorts = false) {
     let token = null;
     for (const it of items || []) {
       if (it.continuationItemRenderer) {
@@ -561,7 +610,7 @@
       const contents = it.itemSectionRenderer ? it.itemSectionRenderer.contents || [] : [it];
       for (const c of contents) {
         const before = out.length;
-        findVideos(c, false, out);
+        findVideos(c, false, out, 0, shorts);
         // Remember formats that held no videos, to explain an empty list.
         if (out.length === before && own) {
           for (const k of Object.keys(c)) if (!SKIP_KEYS.has(k)) own.unknownKinds.add(k);
@@ -571,19 +620,19 @@
     return token;
   }
 
-  function parseFirstPage(json) {
+  function parseFirstPage(json, shorts = false) {
     const items = json?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
     const out = [];
-    const token = collect(items, out);
+    const token = collect(items, out, shorts);
     return { videos: out, token };
   }
 
-  function parseNextPage(json) {
+  function parseNextPage(json, shorts = false) {
     const out = [];
     let token = null;
     for (const cmd of json?.onResponseReceivedCommands || []) {
       const items = cmd.appendContinuationItemsAction?.continuationItems;
-      if (items) token = collect(items, out) || token;
+      if (items) token = collect(items, out, shorts) || token;
     }
     return { videos: out, token };
   }
@@ -609,7 +658,7 @@
   }
 
   /** Loads pages for one search until it has `targetPages` pages or YouTube has no more. */
-  async function fillEntry(e, cfg, query, params, targetPages, isCurrent, onPage) {
+  async function fillEntry(e, cfg, query, params, shorts, targetPages, isCurrent, onPage) {
     while (e.busy) await e.busy.catch(() => {});
     if (e.done || e.pages >= targetPages || !isCurrent()) return;
     e.busy = (async () => {
@@ -617,8 +666,8 @@
         await pace();
         if (!isCurrent()) break;
         let page;
-        if (!e.started) page = await firstPage(cfg, query, params);
-        else page = parseNextPage(await innertubeSearch(cfg, { continuation: e.token }));
+        if (!e.started) page = await firstPage(cfg, query, params, shorts);
+        else page = parseNextPage(await innertubeSearch(cfg, { continuation: e.token }), shorts);
         e.started = true;
         e.pages++;
         e.token = page.token;
@@ -630,22 +679,23 @@
     try { await e.busy; } finally { e.busy = null; }
   }
 
-  async function firstPage(cfg, query, params) {
+  async function firstPage(cfg, query, params, shorts) {
     let page = { videos: [], token: null };
     let apiError = null;
     try {
-      page = parseFirstPage(await innertubeSearch(cfg, { query, params }));
+      page = parseFirstPage(await innertubeSearch(cfg, { query, params }), shorts);
     } catch (err) {
       if (err instanceof ThrottledError) throw err;
       apiError = err;
     }
-    if (page.videos.length === 0) {
+    if (page.videos.length === 0 && !shorts) {
       // Nothing from the API (for example, sign-in-only results): try the normal results page.
+      // Not for Shorts searches, which are often empty anyway.
       try {
         await pace();
         const data = await resultsPageData(query, params);
         if (data) {
-          const fromPage = parseFirstPage(data);
+          const fromPage = parseFirstPage(data, shorts);
           if (fromPage.videos.length || fromPage.token) page = fromPage;
         }
       } catch (err) {
@@ -661,10 +711,11 @@
   let ownRun = 0;
 
   function startOwnList() {
-    const key = getQuery() + '|' + settings.timeframe;
+    const key = getQuery() + '|' + settings.timeframe + '|' + (settings.includeShorts ? 'shorts' : '');
     if (own && own.key === key) return;
     own = {
       key, run: ++ownRun, timeframe: settings.timeframe, query: getQuery(),
+      sources: sourcesFor(settings.timeframe, settings.includeShorts), undatedShorts: new Set(),
       videos: new Map(), seq: 0, targetPages: PAGES_PER_STEP,
       loading: false, done: false, moreAvailable: false, error: null, unknownKinds: new Set(),
     };
@@ -681,12 +732,12 @@
     renderBar();
     const isCurrent = () => own === o;
     const cfg = innertubeConfig();
-    for (const src of SOURCES[o.timeframe]) {
+    for (const src of o.sources) {
       if (!isCurrent()) return;
       const e = cacheEntry(o.query, SP[src]);
       addVideos(e.videos); // whatever is cached already
       try {
-        await fillEntry(e, cfg, o.query, SP[src], o.targetPages, isCurrent, vids => {
+        await fillEntry(e, cfg, o.query, SP[src], isShortsSource(src), o.targetPages, isCurrent, vids => {
           if (isCurrent()) addVideos(vids);
         });
         // Pages another timeframe loaded into this search while we waited.
@@ -700,7 +751,7 @@
     o.loading = false;
     o.done = true;
     o.moreAvailable = !(o.error instanceof ThrottledError) &&
-      SOURCES[o.timeframe].some(src => !cacheEntry(o.query, SP[src]).done);
+      o.sources.some(src => !cacheEntry(o.query, SP[src]).done);
     if (o.error instanceof ThrottledError) scheduleUpdate(); // fall back to YouTube's list
     renderOwnList();
     renderBar();
@@ -716,6 +767,8 @@
     const maxAge = MAX_AGE[own.timeframe];
     for (const v of list) {
       if (own.videos.has(v.id)) continue;
+      if (v.isShort && v.age === AGE_UNKNOWN) { own.undatedShorts.add(v.id); continue; }
+      if (v.isShort && !settings.includeShorts) continue;
       // Only uploads inside the timeframe. Live streams and undated items are left out.
       if (!(v.age >= 0 && v.age < maxAge)) continue;
       v.seq = own.seq++;
@@ -741,7 +794,7 @@
   function buildCard(v) {
     const a = document.createElement('a');
     a.className = 'ytfix-card' + (v.sensitive ? ' ytfix-sensitive' : '');
-    a.href = '/watch?v=' + encodeURIComponent(v.id);
+    a.href = (v.isShort ? '/shorts/' : '/watch?v=') + encodeURIComponent(v.id);
 
     const thumb = document.createElement('div');
     thumb.className = 'ytfix-thumb';
@@ -750,10 +803,10 @@
     img.alt = '';
     img.src = 'https://i.ytimg.com/vi/' + encodeURIComponent(v.id) + '/mqdefault.jpg';
     thumb.append(img);
-    if (v.length) {
+    if (v.length || v.isShort) {
       const len = document.createElement('span');
       len.className = 'ytfix-len';
-      len.textContent = v.length;
+      len.textContent = v.isShort ? 'SHORTS' : v.length;
       thumb.append(len);
     }
 
@@ -931,7 +984,8 @@
       if (!own || !own.done) status.textContent = `${n} from the ${label} so far · searching…`;
       else status.textContent = `${n} videos from the ${label}, newest first` +
         (own.moreAvailable ? ' · more available' : ' · all results loaded') +
-        (own.error && n ? ' (some searches failed)' : '');
+        (own.error && n ? ' (some searches failed)' : '') +
+        (own.undatedShorts.size ? ` · ${own.undatedShorts.size} Shorts left out (YouTube sent no upload date)` : '');
       return;
     }
     if (isBackedOff()) {
