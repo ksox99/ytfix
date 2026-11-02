@@ -14,10 +14,12 @@
 <body>
   <label><input type="checkbox" id="sortEnabled"> Sort search results by upload date (newest first)</label>
   <label>
-    Extra result pages to load automatically:
+    Extra result pages to load automatically (no time filter):
     <input type="number" id="preloadPages" min="0" max="20">
     <small>The sort only covers results already loaded. Each page is about 20 results. 0 turns this off.</small>
   </label>
+  <label><input type="checkbox" id="loadAllWhenFiltered"> Load <b>all</b> results when a time filter is on (Last hour, or YouTube's Today / This week / This month / This year)
+    <small>Time-limited searches have far fewer results, so loading all of them guarantees nothing new is missed.</small></label>
   <label><input type="checkbox" id="hideShelves"> While sorted, show only videos (hide Shorts shelves, "People also watched", channels, playlists)</label>
   <script src="options.js"></script>
 </body>

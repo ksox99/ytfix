@@ -17,7 +17,7 @@
 
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
-  const DEFAULTS = { sortEnabled: true, preloadPages: 3, hideShelves: true };
+  const DEFAULTS = { sortEnabled: true, preloadPages: 3, hideShelves: true, loadAllWhenFiltered: true };
   let settings = { ...DEFAULTS };
 
   // ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@
   const SP_LAST_HOUR = 'EgIIAQ==';
   const SP_TODAY = 'EgIIAg==';
   const ONE_HOUR = 3600;
-  const HOUR_MODE_PAGES = 20;
+  const ALL_PAGES = 60; // "load everything" safety cap (~1200 results)
 
   const getQuery = () => new URLSearchParams(location.search).get('search_query') || '';
 
@@ -175,6 +175,58 @@
     setHourState({ ...st, stage: 'client' });
     return false;
   }
+
+  // ---------------------------------------------------------------------------
+  // Detecting YouTube's own upload-date filter
+  // ---------------------------------------------------------------------------
+  // The `sp` URL parameter is a base64 protobuf. Field 2 holds the filters,
+  // and its field 1 is the upload date (1 = last hour, 2 = today, 3 = week,
+  // 4 = month, 5 = year).
+
+  function readVarint(b, i) {
+    let v = 0, shift = 0, x;
+    do {
+      x = b[i++];
+      v += (x & 0x7f) * 2 ** shift;
+      shift += 7;
+    } while (x & 0x80 && i < b.length);
+    return [v, i];
+  }
+
+  function protoFields(b) {
+    const out = [];
+    let i = 0;
+    while (i < b.length) {
+      let key;
+      [key, i] = readVarint(b, i);
+      const field = Math.floor(key / 8), type = key & 7;
+      if (type === 0) { let v; [v, i] = readVarint(b, i); out.push({ field, v }); }
+      else if (type === 2) { let len; [len, i] = readVarint(b, i); out.push({ field, bytes: b.subarray(i, i + len) }); i += len; }
+      else if (type === 1) i += 8;
+      else if (type === 5) i += 4;
+      else break;
+    }
+    return out;
+  }
+
+  function uploadDateFilter() {
+    let sp = new URLSearchParams(location.search).get('sp');
+    if (!sp) return 0;
+    try {
+      for (let n = 0; n < 3 && sp.includes('%'); n++) sp = decodeURIComponent(sp);
+      const bin = atob(sp.replace(/-/g, '+').replace(/_/g, '/'));
+      const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+      const filters = protoFields(bytes).find(f => f.field === 2 && f.bytes);
+      if (!filters) return 0;
+      const date = protoFields(filters.bytes).find(f => f.field === 1 && 'v' in f);
+      return date ? date.v : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /** True when results are limited in time, so loading all of them is cheap and useful. */
+  const timeFiltered = () => isResultsPage() && (hourMode() || uploadDateFilter() > 0);
 
   // ---------------------------------------------------------------------------
   // Applying sort + filter
@@ -237,6 +289,7 @@
 
   let preloadRun = 0;
   let preloading = false;
+  let exhausted = false; // YouTube has no more results for this search
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -261,7 +314,8 @@
     try {
       for (let p = 0; p < pages; p++) {
         const cont = await waitFor(findContinuation, 6000);
-        if (!cont || run !== preloadRun || location.href !== url) break;
+        if (run !== preloadRun || location.href !== url) break;
+        if (!cont) { exhausted = true; break; }
         cont.classList.add('ytfix-trigger');
         const loaded = await waitFor(() => !cont.isConnected || findContinuation() !== cont, 10000);
         cont.classList.remove('ytfix-trigger');
@@ -311,7 +365,7 @@
     const newest = mk('newest', 'Upload date (newest)');
     const anyTime = mk('anytime', 'Any time');
     const lastHour = mk('lasthour', 'Last hour');
-    const more = mk('more', 'Load more results');
+    const more = mk('more', 'Load all results');
     more.classList.add('ytfix-more');
 
     const status = document.createElement('span');
@@ -321,7 +375,10 @@
     newest.addEventListener('click', () => setSortEnabled(true));
     anyTime.addEventListener('click', () => setLastHour(false));
     lastHour.addEventListener('click', () => setLastHour(true));
-    more.addEventListener('click', () => preload(hourMode() ? HOUR_MODE_PAGES : Math.max(1, settings.preloadPages)));
+    more.addEventListener('click', () => {
+      if (preloading) { cancelPreload(); scheduleUpdate(); }
+      else preload(ALL_PAGES);
+    });
 
     const sep = document.createElement('span');
     sep.className = 'ytfix-sep';
@@ -351,10 +408,11 @@
     bar.querySelector('[data-key="anytime"]').classList.toggle('ytfix-active', !hour);
     bar.querySelector('[data-key="lasthour"]').classList.toggle('ytfix-active', hour);
     const more = bar.querySelector('[data-key="more"]');
-    more.hidden = !on && !hour;
-    more.disabled = preloading;
+    more.hidden = (!on && !hour) || (exhausted && !preloading);
+    more.textContent = preloading ? 'Stop loading' : 'Load all results';
     const status = bar.querySelector('.ytfix-status');
     const { total, dated, shown } = lastStats;
+    const done = exhausted && !preloading ? ' · all results loaded' : '';
     if (hour) {
       const local = hourState()?.stage === 'client'
         ? ' · YouTube ignored the time filter, so this was filtered here' : '';
@@ -363,16 +421,16 @@
       } else if (shown === 0) {
         status.textContent = `Nothing from the last hour among ${total} results${local}`;
       } else {
-        status.textContent = `${shown} videos from the last hour (${total} checked)${local}`;
+        status.textContent = `${shown} videos from the last hour (${total} checked)${done}${local}`;
       }
     } else if (!on) {
       status.textContent = '';
     } else if (preloading) {
-      status.textContent = `Loading more results… (${total} so far)`;
+      status.textContent = `Loading results… (${total} so far)`;
     } else {
       const undated = total - dated;
       status.textContent = `${total} videos sorted` +
-        (undated > 0 ? ` (${undated} without a date at the end)` : '');
+        (undated > 0 ? ` (${undated} without a date at the end)` : '') + done;
     }
   }
 
@@ -405,9 +463,12 @@
   function onNavigate() {
     cancelPreload();
     filterChecked = false;
+    exhausted = false;
     scheduleUpdate();
-    if (hourMode()) {
-      preload(HOUR_MODE_PAGES); // dig until YouTube runs out of results
+    if (timeFiltered() && settings.loadAllWhenFiltered) {
+      preload(ALL_PAGES); // time-limited search: dig until YouTube runs out
+    } else if (hourMode()) {
+      preload(ALL_PAGES); // dig until YouTube runs out of results
     } else if (isResultsPage() && settings.sortEnabled && settings.preloadPages > 0) {
       preload(settings.preloadPages);
     }
@@ -439,7 +500,10 @@
   }
 
   // Exposed for tests only.
-  if (typeof window !== 'undefined') window.__ytfixParseAge = parseAge;
+  if (typeof window !== 'undefined') {
+    window.__ytfixParseAge = parseAge;
+    window.__ytfixDateFilter = uploadDateFilter;
+  }
 
   init();
 })();

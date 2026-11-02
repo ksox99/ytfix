@@ -1,5 +1,5 @@
 const api = typeof browser !== 'undefined' ? browser : chrome;
-const DEFAULTS = { sortEnabled: true, preloadPages: 3, hideShelves: true };
+const DEFAULTS = { sortEnabled: true, preloadPages: 3, hideShelves: true, loadAllWhenFiltered: true };
 
 (async () => {
   const s = await api.storage.local.get(DEFAULTS);
@@ -9,6 +9,9 @@ const DEFAULTS = { sortEnabled: true, preloadPages: 3, hideShelves: true };
   sort.checked = s.sortEnabled;
   pages.value = s.preloadPages;
   shelves.checked = s.hideShelves;
+  const loadAll = document.getElementById('loadAllWhenFiltered');
+  loadAll.checked = s.loadAllWhenFiltered;
+  loadAll.addEventListener('change', () => api.storage.local.set({ loadAllWhenFiltered: loadAll.checked }));
 
   sort.addEventListener('change', () => api.storage.local.set({ sortEnabled: sort.checked }));
   shelves.addEventListener('change', () => api.storage.local.set({ hideShelves: shelves.checked }));

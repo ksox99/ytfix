@@ -5,7 +5,7 @@ The old `&sp=CAI%253D` URL trick stopped working soon after. This add-on puts
 the option back:
 
 ```
-Sort by [Relevance] [Upload date (newest)] | Uploaded [Any time] [Last hour]  [Load more results]  84 videos sorted
+Sort by [Relevance] [Upload date (newest)] | Uploaded [Any time] [Last hour]  [Load all results]  84 videos sorted
 ```
 
 ## How it works
@@ -18,9 +18,14 @@ YouTube's servers no longer return results in date order, so the add-on sorts th
    with no date go at the bottom. Results with the same age ("1 year ago")
    keep YouTube's relevance order. Elements are only reordered with CSS, never
    moved, so YouTube's infinite scroll keeps working.
-3. It quietly loads 3 more pages of results (about 80 in total), so the sort
-   covers more than the first screen. Click **Load more results** to go
-   further back.
+3. It loads more results automatically:
+   - **With a time filter on** (**Last hour**, or YouTube's own *Today / This
+     week / This month / This year*), it loads **every** result, page by page,
+     until YouTube has no more. Nothing gets missed just because YouTube ranked
+     it low. The toolbar says *"all results loaded"* when it's done.
+   - **Without a time filter**, it loads 3 extra pages (about 80 results).
+     Click **Load all results** to keep going until the end. While it loads,
+     the button becomes **Stop loading**.
 
 ### Last hour
 YouTube removed its "Last hour" filter too. Click **Last hour** to get it back:
@@ -30,7 +35,7 @@ YouTube removed its "Last hour" filter too. Click **Last hour** to get it back:
    **Today** filter, which still works. If that is ignored too, it keeps the
    unfiltered results.
 3. It hides everything older than an hour, sorts the rest newest first, and
-   keeps loading pages (up to 20) until YouTube runs out of results.
+   keeps loading pages until YouTube runs out of results.
 
 YouTube rounds ages down, so "1 hour ago" can mean up to 1 h 59 min. Those
 videos are included. Brand-new uploads can take a few minutes before YouTube
@@ -68,6 +73,8 @@ order.
 ## Settings
 Go to `about:addons` → *YouTube Sort by Upload Date* → *Preferences*:
 - Turn sorting on or off by default. The toolbar remembers your last choice.
-- Number of extra pages to load automatically (0–20, default 3).
+- Load all results when a time filter is on. On by default.
+- Number of extra pages to load automatically when no time filter is on
+  (0–20, default 3).
 - Show only videos while sorted. This hides Shorts shelves, "People also
   watched", channels and playlists. On by default.
