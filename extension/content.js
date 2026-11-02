@@ -105,22 +105,93 @@
   const isResultsPage = () => location.pathname === '/results';
   const getSearchRoot = () => document.querySelector('ytd-search');
 
-  let lastStats = { sorted: 0, dated: 0 };
+  // ---------------------------------------------------------------------------
+  // "Last hour" mode
+  // ---------------------------------------------------------------------------
+  // YouTube dropped the "Last hour" filter in Jan 2026. We first try the old
+  // URL code for it. If YouTube ignores it (old videos show up), we switch to
+  // the "Today" filter, which YouTube still supports. If that is ignored too,
+  // we keep the unfiltered results. In every case, results older than an
+  // hour are hidden in the browser, so the end result is the same; only the
+  // number of results YouTube sends to choose from changes.
+
+  const HOUR_KEY = 'ytfix-last-hour';
+  const SP_LAST_HOUR = 'EgIIAQ==';
+  const SP_TODAY = 'EgIIAg==';
+  const ONE_HOUR = 3600;
+  const HOUR_MODE_PAGES = 20;
+
+  const getQuery = () => new URLSearchParams(location.search).get('search_query') || '';
+
+  // State lives in sessionStorage: { q: query, stage: 'hour' | 'today' | 'client' }.
+  function hourState() {
+    try {
+      const s = JSON.parse(sessionStorage.getItem(HOUR_KEY));
+      return s && s.q === getQuery() ? s : null;
+    } catch (_) { return null; }
+  }
+  function setHourState(s) {
+    try {
+      if (s) sessionStorage.setItem(HOUR_KEY, JSON.stringify(s));
+      else sessionStorage.removeItem(HOUR_KEY);
+    } catch (_) { /* ignore */ }
+  }
+  const hourMode = () => isResultsPage() && !!hourState();
+
+  function goSearch(sp) {
+    const u = new URL('/results', location.origin);
+    u.searchParams.set('search_query', getQuery());
+    if (sp) u.searchParams.set('sp', sp);
+    location.assign(u.href);
+  }
+
+  function setLastHour(on) {
+    if (on === hourMode()) return;
+    cancelPreload();
+    if (on) {
+      setHourState({ q: getQuery(), stage: 'hour' });
+      goSearch(SP_LAST_HOUR);
+    } else {
+      setHourState(null);
+      goSearch(null);
+    }
+  }
+
+  // Detect whether YouTube honoured the time filter; step down if not.
+  let filterChecked = false;
+  function checkServerFilter(videos) {
+    if (filterChecked || videos.length < 5) return false;
+    filterChecked = true;
+    const st = hourState();
+    if (!st || st.stage === 'client') return false;
+    const tooOld = st.stage === 'hour' ? 2 * 86400 : 3 * 86400;
+    const old = videos.filter(v => v.age !== AGE_UNKNOWN && v.age > tooOld).length;
+    if (old < 3) return false; // filter works
+    if (st.stage === 'hour') {
+      setHourState({ ...st, stage: 'today' });
+      goSearch(SP_TODAY);
+      return true;
+    }
+    setHourState({ ...st, stage: 'client' });
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Applying sort + filter
+  // ---------------------------------------------------------------------------
+
+  let lastStats = { total: 0, dated: 0, shown: 0 };
 
   function applySort() {
     const root = getSearchRoot();
     if (!root) return;
-    const on = settings.sortEnabled && isResultsPage();
-    root.classList.toggle('ytfix-sorted', on);
-    root.classList.toggle('ytfix-hide-shelves', on && settings.hideShelves);
+    const results = isResultsPage();
+    const sort = settings.sortEnabled && results;
+    const hour = hourMode();
+    root.classList.toggle('ytfix-sorted', sort);
+    root.classList.toggle('ytfix-hide-shelves', (sort || hour) && settings.hideShelves);
 
     const children = root.querySelectorAll(ITEM_SEL);
-    if (!on) {
-      for (const el of children) el.style.removeProperty('order');
-      lastStats = { sorted: 0, dated: 0 };
-      return;
-    }
-
     const videos = [];
     let index = 0;
     for (const el of children) {
@@ -131,15 +202,29 @@
         el.style.removeProperty('order'); // falls back to CSS default (bottom)
       }
     }
-    // Newest first; ties keep YouTube's relevance order.
-    videos.sort((a, b) => (a.age - b.age) || (a.index - b.index));
-    videos.forEach((v, rank) => {
-      const order = String(rank + 1);
-      if (v.el.style.order !== order) v.el.style.order = order;
-    });
+
+    if (hour && checkServerFilter(videos)) return; // reloading with another filter
+
+    for (const v of videos) {
+      const tooOld = hour && !(v.age >= 0 && v.age <= ONE_HOUR);
+      v.el.classList.toggle('ytfix-too-old', tooOld);
+    }
+
+    if (sort) {
+      // Newest first; ties keep YouTube's relevance order.
+      const sorted = [...videos].sort((a, b) => (a.age - b.age) || (a.index - b.index));
+      sorted.forEach((v, rank) => {
+        const order = String(rank + 1);
+        if (v.el.style.order !== order) v.el.style.order = order;
+      });
+    } else {
+      for (const v of videos) v.el.style.removeProperty('order');
+    }
+
     lastStats = {
-      sorted: videos.length,
+      total: videos.length,
       dated: videos.filter(v => v.age !== AGE_UNKNOWN).length,
+      shown: hour ? videos.filter(v => v.age >= 0 && v.age <= ONE_HOUR).length : videos.length,
     };
   }
 
@@ -207,9 +292,12 @@
     bar = document.createElement('div');
     bar.id = 'ytfix-bar';
 
-    const label = document.createElement('span');
-    label.className = 'ytfix-label';
-    label.textContent = 'Sort by';
+    const mkLabel = text => {
+      const s = document.createElement('span');
+      s.className = 'ytfix-label';
+      s.textContent = text;
+      return s;
+    };
 
     const mk = (key, text) => {
       const b = document.createElement('button');
@@ -221,6 +309,8 @@
     };
     const relevance = mk('relevance', 'Relevance');
     const newest = mk('newest', 'Upload date (newest)');
+    const anyTime = mk('anytime', 'Any time');
+    const lastHour = mk('lasthour', 'Last hour');
     const more = mk('more', 'Load more results');
     more.classList.add('ytfix-more');
 
@@ -229,9 +319,15 @@
 
     relevance.addEventListener('click', () => setSortEnabled(false));
     newest.addEventListener('click', () => setSortEnabled(true));
-    more.addEventListener('click', () => preload(Math.max(1, settings.preloadPages)));
+    anyTime.addEventListener('click', () => setLastHour(false));
+    lastHour.addEventListener('click', () => setLastHour(true));
+    more.addEventListener('click', () => preload(hourMode() ? HOUR_MODE_PAGES : Math.max(1, settings.preloadPages)));
 
-    bar.append(label, relevance, newest, more, status);
+    const sep = document.createElement('span');
+    sep.className = 'ytfix-sep';
+
+    bar.append(mkLabel('Sort by'), relevance, newest, sep,
+      mkLabel('Uploaded'), anyTime, lastHour, more, status);
   }
 
   function ensureBar() {
@@ -249,19 +345,33 @@
   function renderBar() {
     if (!bar) return;
     const on = settings.sortEnabled;
+    const hour = hourMode();
     bar.querySelector('[data-key="relevance"]').classList.toggle('ytfix-active', !on);
     bar.querySelector('[data-key="newest"]').classList.toggle('ytfix-active', on);
+    bar.querySelector('[data-key="anytime"]').classList.toggle('ytfix-active', !hour);
+    bar.querySelector('[data-key="lasthour"]').classList.toggle('ytfix-active', hour);
     const more = bar.querySelector('[data-key="more"]');
-    more.hidden = !on;
+    more.hidden = !on && !hour;
     more.disabled = preloading;
     const status = bar.querySelector('.ytfix-status');
-    if (!on) {
+    const { total, dated, shown } = lastStats;
+    if (hour) {
+      const local = hourState()?.stage === 'client'
+        ? ' · YouTube ignored the time filter, so this was filtered here' : '';
+      if (preloading) {
+        status.textContent = `${shown} from the last hour so far · searching (${total} checked)…`;
+      } else if (shown === 0) {
+        status.textContent = `Nothing from the last hour among ${total} results${local}`;
+      } else {
+        status.textContent = `${shown} videos from the last hour (${total} checked)${local}`;
+      }
+    } else if (!on) {
       status.textContent = '';
     } else if (preloading) {
-      status.textContent = `Loading more results… (${lastStats.sorted} so far)`;
+      status.textContent = `Loading more results… (${total} so far)`;
     } else {
-      const undated = lastStats.sorted - lastStats.dated;
-      status.textContent = `${lastStats.sorted} videos sorted` +
+      const undated = total - dated;
+      status.textContent = `${total} videos sorted` +
         (undated > 0 ? ` (${undated} without a date at the end)` : '');
     }
   }
@@ -294,8 +404,11 @@
 
   function onNavigate() {
     cancelPreload();
+    filterChecked = false;
     scheduleUpdate();
-    if (isResultsPage() && settings.sortEnabled && settings.preloadPages > 0) {
+    if (hourMode()) {
+      preload(HOUR_MODE_PAGES); // dig until YouTube runs out of results
+    } else if (isResultsPage() && settings.sortEnabled && settings.preloadPages > 0) {
       preload(settings.preloadPages);
     }
   }

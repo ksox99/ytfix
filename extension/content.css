@@ -83,3 +83,14 @@ ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
   color: var(--yt-spec-text-secondary, #606060);
   font-size: 12px;
 }
+
+/* ---- "Last hour" mode ---- */
+ytd-search .ytfix-too-old {
+  display: none !important;
+}
+#ytfix-bar .ytfix-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--yt-spec-10-percent-layer, rgba(0, 0, 0, 0.1));
+}
