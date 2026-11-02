@@ -47,6 +47,18 @@
     ['dag', S.day], ['weken', S.week], ['maand', S.month], ['jaar', S.year],
   ].sort((a, b) => b[0].length - a[0].length);
 
+  // Short forms YouTube uses ("33 min ago", "3mo ago", "1y ago"). They must
+  // match the whole word. "m" on its own is left out because "6.5M views" uses it.
+  const UNIT_ABBREVIATIONS = new Map([
+    ['s', S.second], ['sec', S.second], ['secs', S.second],
+    ['min', S.minute], ['mins', S.minute],
+    ['h', S.hour], ['hr', S.hour], ['hrs', S.hour], ['std', S.hour],
+    ['d', S.day],
+    ['w', S.week], ['wk', S.week], ['wks', S.week],
+    ['mo', S.month], ['mos', S.month],
+    ['y', S.year], ['yr', S.year], ['yrs', S.year],
+  ]);
+
   const NUM_WORD_RE = /(\d+)\s*([^\s\d.,:;·•()]+)/gu;
   const LIVE_RE = /\b(watching|live now)\b|zuschauer|espectadores|spectateurs/i;
 
@@ -59,6 +71,7 @@
     while ((m = NUM_WORD_RE.exec(lower))) {
       const n = parseInt(m[1], 10);
       const word = m[2];
+      if (UNIT_ABBREVIATIONS.has(word)) return n * UNIT_ABBREVIATIONS.get(word);
       for (const [stem, secs] of UNIT_STEMS) {
         if (word.startsWith(stem)) {
           // "an" (French year) must be the whole word ("an"/"ans").
@@ -80,15 +93,28 @@
   const AGE_LIVE = -1;      // live streams first
   const AGE_UNKNOWN = Infinity;
 
-  function getAge(el) {
-    const spans = el.querySelectorAll(META_SEL);
-    for (const span of spans) {
-      const t = span.textContent.trim();
-      if (!t) continue;
+  // Places a date never comes from: titles and description snippets.
+  const NOT_META = 'h3, #video-title, [class*="title"], .metadata-snippet-container, ' +
+    '#description-text, [class*="description"], [class*="snippet"]';
+
+  function ageFromTexts(nodes, skipNonMeta) {
+    for (const node of nodes) {
+      if (skipNonMeta && node.closest(NOT_META)) continue;
+      const t = node.textContent.trim();
+      if (!t || t.length > 60) continue;
       const age = parseAge(t);
       if (age !== null) return age;
       if (LIVE_RE.test(t)) return AGE_LIVE;
     }
+    return null;
+  }
+
+  function getAge(el) {
+    // Known metadata containers first, then any short text in the card as a
+    // fallback, in case YouTube changes its layout again.
+    const age = ageFromTexts(el.querySelectorAll(META_SEL), false) ??
+      ageFromTexts(el.querySelectorAll('span, yt-formatted-string'), true);
+    if (age !== null) return age;
     if (el.querySelector('.badge-style-type-live-now-alternate, .badge-style-type-live-now, [aria-label="LIVE"]')) {
       return AGE_LIVE;
     }
@@ -116,6 +142,7 @@
   // number of results YouTube sends to choose from changes.
 
   const HOUR_KEY = 'ytfix-last-hour';
+  let navigating = false;
   const SP_LAST_HOUR = 'EgIIAQ==';
   const SP_TODAY = 'EgIIAg==';
   const ONE_HOUR = 3600;
@@ -139,6 +166,10 @@
   const hourMode = () => isResultsPage() && !!hourState();
 
   function goSearch(sp) {
+    // The old results stay on screen until the new page loads, so hide them.
+    getSearchRoot()?.classList.add('ytfix-navigating');
+    navigating = true;
+    renderBar();
     const u = new URL('/results', location.origin);
     u.searchParams.set('search_query', getQuery());
     if (sp) u.searchParams.set('sp', sp);
@@ -160,7 +191,7 @@
   // Detect whether YouTube honoured the time filter; step down if not.
   let filterChecked = false;
   function checkServerFilter(videos) {
-    if (filterChecked || videos.length < 5) return false;
+    if (filterChecked || videos.filter(v => v.age !== AGE_UNKNOWN).length < 5) return false;
     filterChecked = true;
     const st = hourState();
     if (!st || st.stage === 'client') return false;
@@ -232,7 +263,7 @@
   // Applying sort + filter
   // ---------------------------------------------------------------------------
 
-  let lastStats = { total: 0, dated: 0, shown: 0 };
+  let lastStats = { total: 0, dated: 0, shown: 0, unknown: 0 };
 
   function applySort() {
     const root = getSearchRoot();
@@ -258,7 +289,8 @@
     if (hour && checkServerFilter(videos)) return; // reloading with another filter
 
     for (const v of videos) {
-      const tooOld = hour && !(v.age >= 0 && v.age <= ONE_HOUR);
+      // Hide only videos known to be too old. If a date can't be read, keep the video visible.
+      const tooOld = hour && v.age !== AGE_UNKNOWN && !(v.age >= 0 && v.age <= ONE_HOUR);
       v.el.classList.toggle('ytfix-too-old', tooOld);
     }
 
@@ -277,6 +309,7 @@
       total: videos.length,
       dated: videos.filter(v => v.age !== AGE_UNKNOWN).length,
       shown: hour ? videos.filter(v => v.age >= 0 && v.age <= ONE_HOUR).length : videos.length,
+      unknown: videos.filter(v => v.age === AGE_UNKNOWN).length,
     };
   }
 
@@ -411,17 +444,23 @@
     more.hidden = (!on && !hour) || (exhausted && !preloading);
     more.textContent = preloading ? 'Stop loading' : 'Load all results';
     const status = bar.querySelector('.ytfix-status');
-    const { total, dated, shown } = lastStats;
+    if (navigating) {
+      more.hidden = true;
+      status.textContent = 'Loading…';
+      return;
+    }
+    const { total, dated, shown, unknown } = lastStats;
+    const unknownNote = hour && unknown > 0 ? ` · ${unknown} without a readable date shown at the end` : '';
     const done = exhausted && !preloading ? ' · all results loaded' : '';
     if (hour) {
       const local = hourState()?.stage === 'client'
         ? ' · YouTube ignored the time filter, so this was filtered here' : '';
       if (preloading) {
         status.textContent = `${shown} from the last hour so far · searching (${total} checked)…`;
-      } else if (shown === 0) {
+      } else if (shown === 0 && unknown === 0) {
         status.textContent = `Nothing from the last hour among ${total} results${local}`;
       } else {
-        status.textContent = `${shown} videos from the last hour (${total} checked)${done}${local}`;
+        status.textContent = `${shown} videos from the last hour (${total} checked)${done}${unknownNote}${local}`;
       }
     } else if (!on) {
       status.textContent = '';

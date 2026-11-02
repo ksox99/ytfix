@@ -41,6 +41,12 @@ ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
 
 /* ---- Toolbar ---- */
 #ytfix-bar {
+  --ytfix-fg: #0f0f0f;
+  --ytfix-fg-inverse: #fff;
+  --ytfix-fg-secondary: #606060;
+  --ytfix-chip: rgba(0, 0, 0, 0.05);
+  --ytfix-chip-hover: rgba(0, 0, 0, 0.1);
+  --ytfix-sep: rgba(0, 0, 0, 0.1);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -48,7 +54,16 @@ ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
   margin: 12px 0 8px;
   font-family: "Roboto", "Arial", sans-serif;
   font-size: 14px;
-  color: var(--yt-spec-text-primary, #0f0f0f);
+  color: var(--ytfix-fg);
+}
+/* YouTube puts a "dark" attribute on <html> in dark theme. */
+html[dark] #ytfix-bar {
+  --ytfix-fg: #f1f1f1;
+  --ytfix-fg-inverse: #0f0f0f;
+  --ytfix-fg-secondary: #aaa;
+  --ytfix-chip: rgba(255, 255, 255, 0.1);
+  --ytfix-chip-hover: rgba(255, 255, 255, 0.2);
+  --ytfix-sep: rgba(255, 255, 255, 0.2);
 }
 #ytfix-bar .ytfix-label {
   font-weight: 500;
@@ -62,15 +77,15 @@ ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  color: var(--yt-spec-text-primary, #0f0f0f);
-  background: var(--yt-spec-badge-chip-background, rgba(0, 0, 0, 0.05));
+  color: var(--ytfix-fg);
+  background: var(--ytfix-chip);
 }
 #ytfix-bar .ytfix-chip:hover {
-  background: var(--yt-spec-button-chip-background-hover, rgba(0, 0, 0, 0.1));
+  background: var(--ytfix-chip-hover);
 }
 #ytfix-bar .ytfix-chip.ytfix-active {
-  color: var(--yt-spec-text-primary-inverse, #fff);
-  background: var(--yt-spec-text-primary, #0f0f0f);
+  color: var(--ytfix-fg-inverse);
+  background: var(--ytfix-fg);
 }
 #ytfix-bar .ytfix-more {
   margin-left: 8px;
@@ -80,11 +95,12 @@ ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
   cursor: progress;
 }
 #ytfix-bar .ytfix-status {
-  color: var(--yt-spec-text-secondary, #606060);
+  color: var(--ytfix-fg-secondary);
   font-size: 12px;
 }
 
 /* ---- "Last hour" mode ---- */
+ytd-search.ytfix-navigating ytd-section-list-renderer,
 ytd-search .ytfix-too-old {
   display: none !important;
 }
@@ -92,5 +108,5 @@ ytd-search .ytfix-too-old {
   width: 1px;
   height: 20px;
   margin: 0 6px;
-  background: var(--yt-spec-10-percent-layer, rgba(0, 0, 0, 0.1));
+  background: var(--ytfix-sep);
 }
