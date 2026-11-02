@@ -331,6 +331,7 @@
 
   function innertubeConfig() {
     let context = null, apiKey = null, clientVersion = null;
+    const extra = {};
     try {
       const ytcfg = (window.wrappedJSObject || window).ytcfg;
       if (ytcfg && ytcfg.get) {
@@ -338,11 +339,19 @@
         if (c) context = JSON.parse(JSON.stringify(c));
         apiKey = ytcfg.get('INNERTUBE_API_KEY') || null;
         clientVersion = ytcfg.get('INNERTUBE_CLIENT_VERSION') || null;
+        for (const k of ['VISITOR_DATA', 'SESSION_INDEX', 'DELEGATED_SESSION_ID', 'LOGGED_IN']) {
+          const v = ytcfg.get(k);
+          if (v !== undefined && v !== null) extra[k] = String(v);
+        }
       }
     } catch (_) { /* fall back to parsing the page */ }
+    const text = scriptText();
+    const pick = re => (text.match(re) || [])[1] || null;
+    extra.VISITOR_DATA ??= pick(/"VISITOR_DATA":"([^"]+)"/);
+    extra.SESSION_INDEX ??= pick(/"SESSION_INDEX":"?(\d+)"?/);
+    extra.DELEGATED_SESSION_ID ??= pick(/"DELEGATED_SESSION_ID":"([^"]+)"/);
+    extra.LOGGED_IN ??= pick(/"LOGGED_IN":(true|false)/);
     if (!context || !clientVersion) {
-      const text = scriptText();
-      const pick = re => (text.match(re) || [])[1] || null;
       clientVersion = clientVersion || pick(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/) || '2.20260101.00.00';
       apiKey = apiKey || pick(/"INNERTUBE_API_KEY":"([^"]+)"/);
       context = context || {
@@ -354,7 +363,44 @@
         },
       };
     }
-    return { context, apiKey, clientVersion: clientVersion || context.client?.clientVersion };
+    return { context, apiKey, clientVersion: clientVersion || context.client?.clientVersion, extra };
+  }
+
+  async function sha1Hex(str) {
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(str));
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Signed-in requests: YouTube's page proves the sign-in with a
+  // "SAPISIDHASH" header made from the SAPISID cookie. Without it the request
+  // counts as signed out, and age-restricted / mature results are withheld.
+  async function authHeaders(cfg) {
+    const h = {};
+    const e = cfg.extra || {};
+    if (e.VISITOR_DATA) h['X-Goog-Visitor-Id'] = e.VISITOR_DATA;
+    const cookie = name => (document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)')) || [])[1];
+    const sapisid = cookie('SAPISID') || cookie('__Secure-3PAPISID');
+    if (!sapisid) return h;
+    const ts = Math.floor(Date.now() / 1000);
+    const origin = location.origin;
+    const sig = `${ts}_${await sha1Hex(`${ts} ${sapisid} ${origin}`)}`;
+    h.Authorization = `SAPISIDHASH ${sig} SAPISID1PHASH ${sig} SAPISID3PHASH ${sig}`;
+    h['X-Origin'] = origin;
+    h['X-Goog-AuthUser'] = e.SESSION_INDEX || '0';
+    if (e.DELEGATED_SESSION_ID) h['X-Goog-PageId'] = e.DELEGATED_SESSION_ID;
+    if (e.LOGGED_IN) h['X-Youtube-Bootstrap-Logged-In'] = e.LOGGED_IN;
+    return h;
+  }
+
+  /** Backup: load the ordinary results page (normal cookie sign-in) and read its data. */
+  async function resultsPageData(query, params) {
+    const url = location.origin + '/results?search_query=' + encodeURIComponent(query) +
+      '&sp=' + encodeURIComponent(params);
+    const res = await pageFetch(url, { credentials: 'include' });
+    if (!res.ok) throw new Error('YouTube results page returned ' + res.status);
+    const html = await res.text();
+    const m = html.match(/ytInitialData"?\]?\s*=\s*(\{.+?\});\s*<\/script>/s);
+    return m ? JSON.parse(m[1]) : null;
   }
 
   async function innertubeSearch(cfg, body) {
@@ -367,6 +413,7 @@
         'Content-Type': 'application/json',
         'X-Youtube-Client-Name': '1',
         'X-Youtube-Client-Version': cfg.clientVersion,
+        ...(await authHeaders(cfg).catch(() => ({}))),
       },
       body: JSON.stringify({ context: cfg.context, ...body }),
     });
@@ -542,7 +589,26 @@
   }
 
   async function searchAll(cfg, query, params, run) {
-    let page = parseFirstPage(await innertubeSearch(cfg, { query, params }));
+    let page = { videos: [], token: null };
+    let apiError = null;
+    try {
+      page = parseFirstPage(await innertubeSearch(cfg, { query, params }));
+    } catch (err) {
+      apiError = err;
+    }
+    if (page.videos.length === 0) {
+      // Nothing from the API (for example, sign-in-only results): try the normal results page.
+      try {
+        const data = await resultsPageData(query, params);
+        if (data) {
+          const fromPage = parseFirstPage(data);
+          if (fromPage.videos.length || fromPage.token) page = fromPage;
+        }
+      } catch (err) {
+        if (apiError) throw apiError;
+      }
+      if (apiError && page.videos.length === 0 && !page.token) throw apiError;
+    }
     for (let n = 0; ; n++) {
       if (own?.run !== run) return;
       addVideos(page.videos);
