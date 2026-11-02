@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>YouTube Sort by Upload Date</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 16px; color: #15141a; background: #fff; }
+    @media (prefers-color-scheme: dark) { body { color: #fbfbfe; background: #2b2a33; } }
+    label { display: block; margin: 12px 0; }
+    input[type=number] { width: 4em; }
+    small { display: block; opacity: 0.7; margin-left: 1.6em; }
+  </style>
+</head>
+<body>
+  <label><input type="checkbox" id="sortEnabled"> Sort search results by upload date (newest first)</label>
+  <label>
+    Extra result pages to load automatically:
+    <input type="number" id="preloadPages" min="0" max="20">
+    <small>The sort only covers results already loaded. Each page is about 20 results. 0 turns this off.</small>
+  </label>
+  <label><input type="checkbox" id="hideShelves"> While sorted, show only videos (hide Shorts shelves, "People also watched", channels, playlists)</label>
+  <script src="options.js"></script>
+</body>
+</html>

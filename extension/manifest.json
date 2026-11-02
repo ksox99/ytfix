@@ -1,0 +1,32 @@
+{
+  "manifest_version": 2,
+  "name": "YouTube Sort by Upload Date",
+  "version": "1.0.0",
+  "description": "Brings back sorting YouTube search results by upload date (newest first).",
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "permissions": ["storage", "https://www.youtube.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "browser_style": false
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "yt-sort-upload-date@ytfix",
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  }
+}

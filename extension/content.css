@@ -1,0 +1,85 @@
+/* ---- Reordering: flatten the result sections into one flex column ---- */
+ytd-search.ytfix-sorted ytd-section-list-renderer > #contents {
+  display: flex !important;
+  flex-direction: column !important;
+}
+ytd-search.ytfix-sorted ytd-section-list-renderer > #contents > ytd-item-section-renderer,
+ytd-search.ytfix-sorted ytd-item-section-renderer > #contents {
+  display: contents !important;
+}
+/* Anything not given an explicit order (shelves, headers, ads) goes after the videos. */
+ytd-search.ytfix-sorted ytd-item-section-renderer > #contents > *,
+ytd-search.ytfix-sorted ytd-item-section-renderer > :not(#contents) {
+  order: 1000000;
+}
+/* The infinite-scroll spinner must stay last. */
+ytd-search.ytfix-sorted ytd-continuation-item-renderer {
+  order: 2000000 !important;
+}
+
+/* ---- Optional: when sorted, show only videos ---- */
+ytd-search.ytfix-hide-shelves ytd-item-section-renderer > #contents >
+  :not(ytd-video-renderer):not(yt-lockup-view-model):not(ytd-continuation-item-renderer),
+ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
+  display: none !important;
+}
+
+/* ---- Preload trick: keep the spinner inside the viewport, invisibly ---- */
+.ytfix-trigger {
+  position: fixed !important;
+  top: 40vh !important;
+  left: 0 !important;
+  margin: 0 !important;
+  transform: none !important;
+  width: 20px !important;
+  height: 20px !important;
+  overflow: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  z-index: -1 !important;
+}
+
+/* ---- Toolbar ---- */
+#ytfix-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 8px;
+  font-family: "Roboto", "Arial", sans-serif;
+  font-size: 14px;
+  color: var(--yt-spec-text-primary, #0f0f0f);
+}
+#ytfix-bar .ytfix-label {
+  font-weight: 500;
+  margin-right: 4px;
+}
+#ytfix-bar .ytfix-chip {
+  font: inherit;
+  font-weight: 500;
+  height: 32px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--yt-spec-text-primary, #0f0f0f);
+  background: var(--yt-spec-badge-chip-background, rgba(0, 0, 0, 0.05));
+}
+#ytfix-bar .ytfix-chip:hover {
+  background: var(--yt-spec-button-chip-background-hover, rgba(0, 0, 0, 0.1));
+}
+#ytfix-bar .ytfix-chip.ytfix-active {
+  color: var(--yt-spec-text-primary-inverse, #fff);
+  background: var(--yt-spec-text-primary, #0f0f0f);
+}
+#ytfix-bar .ytfix-more {
+  margin-left: 8px;
+}
+#ytfix-bar .ytfix-chip:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+#ytfix-bar .ytfix-status {
+  color: var(--yt-spec-text-secondary, #606060);
+  font-size: 12px;
+}
