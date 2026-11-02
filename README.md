@@ -5,7 +5,7 @@ The old `&sp=CAI%253D` URL trick stopped working soon after. This add-on puts
 the option back:
 
 ```
-Sort by [Relevance] [Upload date (newest)] | Uploaded [Any time] [Last hour]  [Load all results]  84 videos sorted
+Sort by [Relevance] [Upload date (newest)] | Uploaded [Any time] [Last hour] [Today] [This week]  [Load all results]  84 videos sorted
 ```
 
 ## How it works
@@ -27,25 +27,20 @@ YouTube's servers no longer return results in date order, so the add-on sorts th
      Click **Load all results** to keep going until the end. While it loads,
      the button becomes **Stop loading**.
 
-### Last hour
-YouTube removed its "Last hour" filter too. Click **Last hour** to get it back:
-
-1. It first tries YouTube's old "last hour" filter code.
-2. If YouTube ignores it (old videos show up), it switches to YouTube's
-   **Today** filter, which still works. If that is ignored too, it keeps the
-   unfiltered results.
-3. It hides everything older than an hour, sorts the rest newest first, and
-   keeps loading pages until YouTube runs out of results.
+### Uploaded: Any time / Last hour / Today / This week
+- **Today** and **This week** switch on YouTube's own upload-date filter
+  (it still works, only the sort was removed), then the add-on sorts and loads
+  every result.
+- **Last hour**: YouTube no longer has this filter, so the add-on switches on
+  **Today** for you and hides everything older than an hour. Switching
+  between Last hour and Today is instant, because both use the same results.
 
 YouTube rounds ages down, so "1 hour ago" can mean up to 1 h 59 min. Those
-videos are included. Brand-new uploads can take a few minutes before YouTube
-puts them in search at all. The add-on can't speed that up.
-Click **Any time** to turn it off.
+videos are included in Last hour. Brand-new uploads can take a few minutes to
+show up in YouTube search at all.
 
-**Tip:** for a really fresh list, combine it with YouTube's own
-*Filters → Upload date → Today / This week / This month*. YouTube still
-supports that filter. The add-on then puts everything inside that window in
-order.
+YouTube's own *Filters → Upload date* (This month / This year) works with
+the add-on too.
 
 ### Limitations
 - Only results that have loaded can be sorted. This is a reordering of

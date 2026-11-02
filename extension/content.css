@@ -101,7 +101,7 @@ html[dark] #ytfix-bar {
 
 /* ---- "Last hour" mode ---- */
 ytd-search.ytfix-navigating ytd-section-list-renderer,
-ytd-search .ytfix-too-old {
+ytd-search.ytfix-hour ytd-item-section-renderer > #contents > :not(.ytfix-ok):not(ytd-continuation-item-renderer) {
   display: none !important;
 }
 #ytfix-bar .ytfix-sep {

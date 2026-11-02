@@ -132,38 +132,45 @@
   const getSearchRoot = () => document.querySelector('ytd-search');
 
   // ---------------------------------------------------------------------------
-  // "Last hour" mode
+  // Upload-time buttons: Any time / Last hour / Today / This week
   // ---------------------------------------------------------------------------
-  // YouTube dropped the "Last hour" filter in Jan 2026. We first try the old
-  // URL code for it. If YouTube ignores it (old videos show up), we switch to
-  // the "Today" filter, which YouTube still supports. If that is ignored too,
-  // we keep the unfiltered results. In every case, results older than an
-  // hour are hidden in the browser, so the end result is the same; only the
-  // number of results YouTube sends to choose from changes.
+  // "Today" and "This week" just apply YouTube's own upload-date filter, which
+  // still works. YouTube has no "Last hour" filter any more (the old code is
+  // unreliable), so "Last hour" applies "Today" and then hides anything older
+  // than an hour in the browser.
 
-  const HOUR_KEY = 'ytfix-last-hour';
-  let navigating = false;
-  const SP_LAST_HOUR = 'EgIIAQ==';
   const SP_TODAY = 'EgIIAg==';
+  const SP_WEEK = 'EgIIAw==';
+  const DATE_TODAY = 2, DATE_WEEK = 3;
+  const HOUR_KEY = 'ytfix-last-hour';
   const ONE_HOUR = 3600;
   const ALL_PAGES = 60; // "load everything" safety cap (~1200 results)
+  let navigating = false;
 
   const getQuery = () => new URLSearchParams(location.search).get('search_query') || '';
 
-  // State lives in sessionStorage: { q: query, stage: 'hour' | 'today' | 'client' }.
-  function hourState() {
-    try {
-      const s = JSON.parse(sessionStorage.getItem(HOUR_KEY));
-      return s && s.q === getQuery() ? s : null;
-    } catch (_) { return null; }
+  // Last hour mode is remembered per tab and per search query.
+  function hourMode() {
+    if (!isResultsPage()) return false;
+    try { return sessionStorage.getItem(HOUR_KEY) === getQuery(); } catch (_) { return false; }
   }
-  function setHourState(s) {
+  function setHourMode(on) {
     try {
-      if (s) sessionStorage.setItem(HOUR_KEY, JSON.stringify(s));
+      if (on) sessionStorage.setItem(HOUR_KEY, getQuery());
       else sessionStorage.removeItem(HOUR_KEY);
     } catch (_) { /* ignore */ }
   }
-  const hourMode = () => isResultsPage() && !!hourState();
+
+  /** Which upload-time button is active: 'any', 'hour', 'today', 'week' or '' (YouTube's month/year). */
+  function timeMode() {
+    if (hourMode()) return 'hour';
+    switch (uploadDateFilter()) {
+      case 0: return 'any';
+      case DATE_TODAY: return 'today';
+      case DATE_WEEK: return 'week';
+      default: return '';
+    }
+  }
 
   function goSearch(sp) {
     // The old results stay on screen until the new page loads, so hide them.
@@ -176,35 +183,18 @@
     location.assign(u.href);
   }
 
-  function setLastHour(on) {
-    if (on === hourMode()) return;
+  function setTimeMode(mode) {
+    if (mode === timeMode()) return;
+    setHourMode(mode === 'hour');
+    const sp = { hour: SP_TODAY, today: SP_TODAY, week: SP_WEEK }[mode] || null;
+    // Going between Last hour and Today keeps the same YouTube results, so
+    // no reload is needed.
+    if (sp === SP_TODAY && uploadDateFilter() === DATE_TODAY) {
+      update();
+      return;
+    }
     cancelPreload();
-    if (on) {
-      setHourState({ q: getQuery(), stage: 'hour' });
-      goSearch(SP_LAST_HOUR);
-    } else {
-      setHourState(null);
-      goSearch(null);
-    }
-  }
-
-  // Detect whether YouTube honoured the time filter; step down if not.
-  let filterChecked = false;
-  function checkServerFilter(videos) {
-    if (filterChecked || videos.filter(v => v.age !== AGE_UNKNOWN).length < 5) return false;
-    filterChecked = true;
-    const st = hourState();
-    if (!st || st.stage === 'client') return false;
-    const tooOld = st.stage === 'hour' ? 2 * 86400 : 3 * 86400;
-    const old = videos.filter(v => v.age !== AGE_UNKNOWN && v.age > tooOld).length;
-    if (old < 3) return false; // filter works
-    if (st.stage === 'hour') {
-      setHourState({ ...st, stage: 'today' });
-      goSearch(SP_TODAY);
-      return true;
-    }
-    setHourState({ ...st, stage: 'client' });
-    return false;
+    goSearch(sp);
   }
 
   // ---------------------------------------------------------------------------
@@ -263,7 +253,7 @@
   // Applying sort + filter
   // ---------------------------------------------------------------------------
 
-  let lastStats = { total: 0, dated: 0, shown: 0, unknown: 0 };
+  let lastStats = { total: 0, dated: 0, shown: 0, unreadable: false };
 
   function applySort() {
     const root = getSearchRoot();
@@ -273,6 +263,9 @@
     const hour = hourMode();
     root.classList.toggle('ytfix-sorted', sort);
     root.classList.toggle('ytfix-hide-shelves', (sort || hour) && settings.hideShelves);
+    // In Last hour mode, CSS hides every video until it's marked .ytfix-ok
+    // below. Videos that are too old never appear, not even briefly.
+    root.classList.toggle('ytfix-hour', hour);
 
     const children = root.querySelectorAll(ITEM_SEL);
     const videos = [];
@@ -286,13 +279,11 @@
       }
     }
 
-    if (hour && checkServerFilter(videos)) return; // reloading with another filter
-
-    for (const v of videos) {
-      // Hide only videos known to be too old. If a date can't be read, keep the video visible.
-      const tooOld = hour && v.age !== AGE_UNKNOWN && !(v.age >= 0 && v.age <= ONE_HOUR);
-      v.el.classList.toggle('ytfix-too-old', tooOld);
-    }
+    // If no dates can be read at all, YouTube's layout probably changed. Show
+    // everything rather than an empty page.
+    const anyDated = videos.some(v => v.age !== AGE_UNKNOWN);
+    const isRecent = v => (v.age >= 0 && v.age <= ONE_HOUR) || (v.age === AGE_UNKNOWN && !anyDated);
+    for (const v of videos) v.el.classList.toggle('ytfix-ok', hour && isRecent(v));
 
     if (sort) {
       // Newest first; ties keep YouTube's relevance order.
@@ -308,8 +299,8 @@
     lastStats = {
       total: videos.length,
       dated: videos.filter(v => v.age !== AGE_UNKNOWN).length,
-      shown: hour ? videos.filter(v => v.age >= 0 && v.age <= ONE_HOUR).length : videos.length,
-      unknown: videos.filter(v => v.age === AGE_UNKNOWN).length,
+      shown: hour ? videos.filter(isRecent).length : videos.length,
+      unreadable: !anyDated && videos.length > 0,
     };
   }
 
@@ -396,8 +387,12 @@
     };
     const relevance = mk('relevance', 'Relevance');
     const newest = mk('newest', 'Upload date (newest)');
-    const anyTime = mk('anytime', 'Any time');
-    const lastHour = mk('lasthour', 'Last hour');
+    const times = [['any', 'Any time'], ['hour', 'Last hour'], ['today', 'Today'], ['week', 'This week']]
+      .map(([key, text]) => {
+        const b = mk('time-' + key, text);
+        b.addEventListener('click', () => setTimeMode(key));
+        return b;
+      });
     const more = mk('more', 'Load all results');
     more.classList.add('ytfix-more');
 
@@ -406,8 +401,6 @@
 
     relevance.addEventListener('click', () => setSortEnabled(false));
     newest.addEventListener('click', () => setSortEnabled(true));
-    anyTime.addEventListener('click', () => setLastHour(false));
-    lastHour.addEventListener('click', () => setLastHour(true));
     more.addEventListener('click', () => {
       if (preloading) { cancelPreload(); scheduleUpdate(); }
       else preload(ALL_PAGES);
@@ -417,7 +410,7 @@
     sep.className = 'ytfix-sep';
 
     bar.append(mkLabel('Sort by'), relevance, newest, sep,
-      mkLabel('Uploaded'), anyTime, lastHour, more, status);
+      mkLabel('Uploaded'), ...times, more, status);
   }
 
   function ensureBar() {
@@ -438,8 +431,10 @@
     const hour = hourMode();
     bar.querySelector('[data-key="relevance"]').classList.toggle('ytfix-active', !on);
     bar.querySelector('[data-key="newest"]').classList.toggle('ytfix-active', on);
-    bar.querySelector('[data-key="anytime"]').classList.toggle('ytfix-active', !hour);
-    bar.querySelector('[data-key="lasthour"]').classList.toggle('ytfix-active', hour);
+    const time = timeMode();
+    for (const key of ['any', 'hour', 'today', 'week']) {
+      bar.querySelector(`[data-key="time-${key}"]`).classList.toggle('ytfix-active', time === key);
+    }
     const more = bar.querySelector('[data-key="more"]');
     more.hidden = (!on && !hour) || (exhausted && !preloading);
     more.textContent = preloading ? 'Stop loading' : 'Load all results';
@@ -449,18 +444,18 @@
       status.textContent = 'Loading…';
       return;
     }
-    const { total, dated, shown, unknown } = lastStats;
-    const unknownNote = hour && unknown > 0 ? ` · ${unknown} without a readable date shown at the end` : '';
+    const { total, dated, shown, unreadable } = lastStats;
     const done = exhausted && !preloading ? ' · all results loaded' : '';
     if (hour) {
-      const local = hourState()?.stage === 'client'
-        ? ' · YouTube ignored the time filter, so this was filtered here' : '';
-      if (preloading) {
-        status.textContent = `${shown} from the last hour so far · searching (${total} checked)…`;
-      } else if (shown === 0 && unknown === 0) {
-        status.textContent = `Nothing from the last hour among ${total} results${local}`;
+      const source = uploadDateFilter() === DATE_TODAY ? '' : ' (tip: no Today filter on, so fewer results to pick from)';
+      if (unreadable) {
+        status.textContent = `Couldn't read upload dates, showing all ${total} results`;
+      } else if (preloading) {
+        status.textContent = `${shown} from the last hour so far · checked ${total} of YouTube's results…${source}`;
+      } else if (shown === 0) {
+        status.textContent = `Nothing from the last hour among ${total} results${done}${source}`;
       } else {
-        status.textContent = `${shown} videos from the last hour (${total} checked)${done}${unknownNote}${local}`;
+        status.textContent = `${shown} from the last hour (checked ${total})${done}${source}`;
       }
     } else if (!on) {
       status.textContent = '';
@@ -501,7 +496,6 @@
 
   function onNavigate() {
     cancelPreload();
-    filterChecked = false;
     exhausted = false;
     scheduleUpdate();
     if (timeFiltered() && settings.loadAllWhenFiltered) {
