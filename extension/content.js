@@ -728,7 +728,8 @@
     if (own && own.key === key) return;
     own = {
       key, run: ++ownRun, timeframe: settings.timeframe, query: getQuery(),
-      sources: sourcesFor(settings.timeframe, settings.includeShorts), undatedShorts: new Set(),
+      sources: sourcesFor(settings.timeframe, settings.includeShorts),
+      shorts: new Map(), // undated Shorts: id -> { v, window, seq }
       videos: new Map(), seq: 0, targetPages: PAGES_PER_STEP,
       loading: false, done: false, moreAvailable: false, error: null, unknownKinds: new Set(),
     };
@@ -748,13 +749,13 @@
     for (const src of o.sources) {
       if (!isCurrent()) return;
       const e = cacheEntry(o.query, SP[src]);
-      addVideos(e.videos); // whatever is cached already
+      addVideos(e.videos, src); // whatever is cached already
       try {
         await fillEntry(e, cfg, o.query, SP[src], isShortsSource(src), o.targetPages, isCurrent, vids => {
-          if (isCurrent()) addVideos(vids);
+          if (isCurrent()) addVideos(vids, src);
         });
         // Pages another timeframe loaded into this search while we waited.
-        if (isCurrent()) addVideos(e.videos);
+        if (isCurrent()) addVideos(e.videos, src);
       } catch (err) {
         if (isCurrent()) o.error = err;
         if (err instanceof ThrottledError) break;
@@ -776,12 +777,22 @@
     loadOwn();
   }
 
-  function addVideos(list) {
+  function addVideos(list, src) {
     const maxAge = MAX_AGE[own.timeframe];
+    // Every search has an upload-date filter, so even an undated item is known
+    // to be inside that search's window.
+    const window = MAX_AGE[src.replace(/Shorts$/, '')];
     for (const v of list) {
       if (own.videos.has(v.id)) continue;
-      if (v.isShort && v.age === AGE_UNKNOWN) { own.undatedShorts.add(v.id); continue; }
       if (v.isShort && !settings.includeShorts) continue;
+      if (v.isShort && v.age === AGE_UNKNOWN) {
+        // YouTube gives Shorts in search no upload time: group them by window instead.
+        const prev = own.shorts.get(v.id);
+        if (!prev) own.shorts.set(v.id, { v, window, seq: own.seq++ });
+        else if (window < prev.window) prev.window = window;
+        continue;
+      }
+      own.shorts.delete(v.id); // a dated copy wins
       // Only uploads inside the timeframe. Live streams and undated items are left out.
       if (!(v.age >= 0 && v.age < maxAge)) continue;
       v.seq = own.seq++;
@@ -840,12 +851,90 @@
     return a;
   }
 
+  let shelvesEl = null, videosEl = null;
+  const shortCards = new Map(); // video id -> element
+
+  function buildShortCard(v) {
+    const a = document.createElement('a');
+    a.className = 'ytfix-short' + (v.sensitive ? ' ytfix-sensitive' : '');
+    a.href = '/shorts/' + encodeURIComponent(v.id);
+    const thumb = document.createElement('div');
+    thumb.className = 'ytfix-short-thumb';
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = '';
+    // Shorts have a portrait thumbnail; fall back to the standard one.
+    img.src = 'https://i.ytimg.com/vi/' + encodeURIComponent(v.id) + '/oardefault.jpg';
+    img.addEventListener('error', () => {
+      const alt = 'https://i.ytimg.com/vi/' + encodeURIComponent(v.id) + '/hqdefault.jpg';
+      if (img.src !== alt) img.src = alt;
+    }, { once: true });
+    thumb.append(img);
+    const title = document.createElement('div');
+    title.className = 'ytfix-short-title';
+    title.textContent = v.title;
+    const views = document.createElement('div');
+    views.className = 'ytfix-meta';
+    views.textContent = v.views;
+    a.append(thumb, title, views);
+    return a;
+  }
+
+  const SHELF_LABEL = { [S.hour]: 'last hour', [S.day]: 'last 24 hours', [S.week]: 'last week' };
+
+  function renderShelves() {
+    const groups = new Map();
+    for (const s of [...own.shorts.values()].sort((a, b) => (a.window - b.window) || (a.seq - b.seq))) {
+      if (!groups.has(s.window)) groups.set(s.window, []);
+      groups.get(s.window).push(s.v);
+    }
+    const wanted = [];
+    let first = true;
+    for (const [window, vids] of groups) {
+      const key = 'shelf-' + window;
+      let shelf = shelvesEl.querySelector(`[data-shelf="${key}"]`);
+      if (!shelf) {
+        shelf = document.createElement('section');
+        shelf.className = 'ytfix-shelf';
+        shelf.dataset.shelf = key;
+        const h = document.createElement('div');
+        h.className = 'ytfix-shelf-title';
+        const row = document.createElement('div');
+        row.className = 'ytfix-shelf-row';
+        shelf.append(h, row);
+      }
+      const label = window === S.day && groups.has(S.hour) ? 'earlier today'
+        : window === S.week && (groups.has(S.hour) || groups.has(S.day)) ? 'earlier this week'
+        : SHELF_LABEL[window];
+      shelf.firstChild.textContent = `Shorts · ${label} (${vids.length})` +
+        (first ? " · YouTube doesn't give exact upload times for Shorts, so these are in YouTube's order" : '');
+      first = false;
+      const row = shelf.lastChild;
+      let prev = null;
+      for (const v of vids) {
+        let card = shortCards.get(v.id);
+        if (!card) { card = buildShortCard(v); shortCards.set(v.id, card); }
+        const want = prev ? prev.nextSibling : row.firstChild;
+        if (want !== card) row.insertBefore(card, want);
+        prev = card;
+      }
+      while (prev && prev.nextSibling) prev.nextSibling.remove();
+      wanted.push(shelf);
+    }
+    shelvesEl.replaceChildren(...wanted);
+  }
+
   function ensureListEl() {
     const primary = getSearchRoot()?.querySelector('#primary');
     if (!primary) return null;
     if (!listEl) {
       listEl = document.createElement('div');
       listEl.id = 'ytfix-results';
+      shelvesEl = document.createElement('div');
+      shelvesEl.className = 'ytfix-shelves';
+      videosEl = document.createElement('div');
+      videosEl.className = 'ytfix-videos';
+      listEl.append(shelvesEl, videosEl);
     }
     if (bar && bar.isConnected && bar.nextSibling !== listEl) bar.after(listEl);
     else if (!listEl.isConnected) primary.prepend(listEl);
@@ -857,14 +946,18 @@
       listEl?.remove();
       return;
     }
-    const el = ensureListEl();
-    if (!el) return;
-    el.classList.toggle('ytfix-unblur', unblurred);
-    if (el.dataset.key !== own.key) {
-      el.textContent = '';
+    const root = ensureListEl();
+    if (!root) return;
+    root.classList.toggle('ytfix-unblur', unblurred);
+    if (root.dataset.key !== own.key) {
+      shelvesEl.textContent = '';
+      videosEl.textContent = '';
       cards.clear();
-      el.dataset.key = own.key;
+      shortCards.clear();
+      root.dataset.key = own.key;
     }
+    renderShelves();
+    const el = videosEl;
     const sorted = [...own.videos.values()].sort((a, b) => (a.age - b.age) || (a.seq - b.seq));
     let prev = null;
     for (const v of sorted) {
@@ -875,7 +968,13 @@
       prev = card;
     }
     let empty = el.querySelector('.ytfix-empty');
-    if (own.done && sorted.length === 0) {
+    // Cards of videos no longer in the list (e.g. a Short that turned out to have a date).
+    for (let n = prev ? prev.nextSibling : el.firstChild; n;) {
+      const next = n.nextSibling;
+      if (!n.classList.contains('ytfix-empty')) n.remove();
+      n = next;
+    }
+    if (own.done && sorted.length === 0 && own.shorts.size === 0) {
       if (!empty) {
         empty = document.createElement('div');
         empty.className = 'ytfix-empty';
@@ -974,7 +1073,8 @@
     const more = bar.querySelector('[data-key="more"]');
     const status = bar.querySelector('.ytfix-status');
     const unblur = bar.querySelector('[data-key="unblur"]');
-    const anySensitive = ownMode && own && [...own.videos.values()].some(v => v.sensitive);
+    const anySensitive = ownMode && own && ([...own.videos.values()].some(v => v.sensitive) ||
+      [...own.shorts.values()].some(s => s.v.sensitive));
     unblur.hidden = !anySensitive;
     unblur.textContent = unblurred ? 'Blur thumbnails' : 'Unblur thumbnails';
     if (navigating) {
@@ -998,7 +1098,7 @@
       else status.textContent = `${n} videos from the ${label}, newest first` +
         (own.moreAvailable ? ' · more available' : ' · all results loaded') +
         (own.error && n ? ' (some searches failed)' : '') +
-        (own.undatedShorts.size ? ` · ${own.undatedShorts.size} Shorts left out (YouTube sent no upload date)` : '');
+        (own.shorts.size ? ` · plus ${own.shorts.size} Shorts` : '');
       return;
     }
     if (isBackedOff()) {
