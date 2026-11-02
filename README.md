@@ -31,9 +31,11 @@ YouTube's servers no longer return results in date order, so the add-on sorts th
 - **Today** and **This week** switch on YouTube's own upload-date filter
   (it still works, only the sort was removed), then the add-on sorts and loads
   every result.
-- **Last hour**: YouTube no longer has this filter, so the add-on switches on
-  **Today** for you and hides everything older than an hour. Switching
-  between Last hour and Today is instant, because both use the same results.
+- **Last hour**: YouTube removed this from its menu, but its old filter code
+  still works and returns genuinely fresh uploads. The add-on uses that code,
+  sorts newest first, and hides anything that still says it's older than an
+  hour. This is the best option for "what was just uploaded". YouTube's own
+  **Today** list is much smaller and misses many recent uploads.
 
 YouTube rounds ages down, so "1 hour ago" can mean up to 1 h 59 min. Those
 videos are included in Last hour. Brand-new uploads can take a few minutes to

@@ -134,38 +134,29 @@
   // ---------------------------------------------------------------------------
   // Upload-time buttons: Any time / Last hour / Today / This week
   // ---------------------------------------------------------------------------
-  // "Today" and "This week" just apply YouTube's own upload-date filter, which
-  // still works. YouTube has no "Last hour" filter any more (the old code is
-  // unreliable), so "Last hour" applies "Today" and then hides anything older
-  // than an hour in the browser.
+  // Each button applies a YouTube upload-date filter code. YouTube's menu no
+  // longer offers "Last hour", but its old code still works and returns
+  // genuinely fresh uploads. YouTube's "Today" list is much worse. In Last
+  // hour mode the add-on also hides anything its date says is older than an
+  // hour, in case YouTube slips some in.
 
+  const SP_HOUR = 'EgIIAQ==';
   const SP_TODAY = 'EgIIAg==';
   const SP_WEEK = 'EgIIAw==';
-  const DATE_TODAY = 2, DATE_WEEK = 3;
-  const HOUR_KEY = 'ytfix-last-hour';
+  const DATE_HOUR = 1, DATE_TODAY = 2, DATE_WEEK = 3;
   const ONE_HOUR = 3600;
   const ALL_PAGES = 60; // "load everything" safety cap (~1200 results)
   let navigating = false;
 
   const getQuery = () => new URLSearchParams(location.search).get('search_query') || '';
 
-  // Last hour mode is remembered per tab and per search query.
-  function hourMode() {
-    if (!isResultsPage()) return false;
-    try { return sessionStorage.getItem(HOUR_KEY) === getQuery(); } catch (_) { return false; }
-  }
-  function setHourMode(on) {
-    try {
-      if (on) sessionStorage.setItem(HOUR_KEY, getQuery());
-      else sessionStorage.removeItem(HOUR_KEY);
-    } catch (_) { /* ignore */ }
-  }
+  const hourMode = () => isResultsPage() && uploadDateFilter() === DATE_HOUR;
 
   /** Which upload-time button is active: 'any', 'hour', 'today', 'week' or '' (YouTube's month/year). */
   function timeMode() {
-    if (hourMode()) return 'hour';
     switch (uploadDateFilter()) {
       case 0: return 'any';
+      case DATE_HOUR: return 'hour';
       case DATE_TODAY: return 'today';
       case DATE_WEEK: return 'week';
       default: return '';
@@ -185,16 +176,8 @@
 
   function setTimeMode(mode) {
     if (mode === timeMode()) return;
-    setHourMode(mode === 'hour');
-    const sp = { hour: SP_TODAY, today: SP_TODAY, week: SP_WEEK }[mode] || null;
-    // Going between Last hour and Today keeps the same YouTube results, so
-    // no reload is needed.
-    if (sp === SP_TODAY && uploadDateFilter() === DATE_TODAY) {
-      update();
-      return;
-    }
     cancelPreload();
-    goSearch(sp);
+    goSearch({ hour: SP_HOUR, today: SP_TODAY, week: SP_WEEK }[mode] || null);
   }
 
   // ---------------------------------------------------------------------------
@@ -447,15 +430,14 @@
     const { total, dated, shown, unreadable } = lastStats;
     const done = exhausted && !preloading ? ' · all results loaded' : '';
     if (hour) {
-      const source = uploadDateFilter() === DATE_TODAY ? '' : ' (tip: no Today filter on, so fewer results to pick from)';
       if (unreadable) {
         status.textContent = `Couldn't read upload dates, showing all ${total} results`;
       } else if (preloading) {
-        status.textContent = `${shown} from the last hour so far · checked ${total} of YouTube's results…${source}`;
+        status.textContent = `${shown} from the last hour so far · checked ${total} of YouTube's results…`;
       } else if (shown === 0) {
-        status.textContent = `Nothing from the last hour among ${total} results${done}${source}`;
+        status.textContent = `Nothing from the last hour among ${total} results${done}`;
       } else {
-        status.textContent = `${shown} from the last hour (checked ${total})${done}${source}`;
+        status.textContent = `${shown} from the last hour (checked ${total})${done}`;
       }
     } else if (!on) {
       status.textContent = '';
