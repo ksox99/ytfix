@@ -135,6 +135,22 @@
 
   const ITEM_SEL = 'ytd-item-section-renderer > #contents > *';
   const VIDEO_TAGS = new Set(['YTD-VIDEO-RENDERER', 'YT-LOCKUP-VIEW-MODEL']);
+  // Groups of several items that should never be sorted as one video.
+  const GROUP_TAGS = new Set([
+    'YTD-SHELF-RENDERER', 'YTD-REEL-SHELF-RENDERER', 'YTD-RICH-SHELF-RENDERER',
+    'YTD-HORIZONTAL-CARD-LIST-RENDERER', 'YTD-VERTICAL-LIST-RENDERER', 'GRID-SHELF-VIEW-MODEL',
+    'YTD-AD-SLOT-RENDERER', 'YTD-CHANNEL-RENDERER', 'YTD-PLAYLIST-RENDERER', 'YTD-RADIO-RENDERER',
+    'YTD-CONTINUATION-ITEM-RENDERER',
+  ]);
+
+  /** The video inside a result-list item: the item itself, or the one video
+   *  inside a wrapper (for example YouTube's blur wrapper for sensitive results). */
+  function videoOf(child) {
+    if (VIDEO_TAGS.has(child.tagName)) return child;
+    if (GROUP_TAGS.has(child.tagName)) return null;
+    const inner = child.querySelectorAll('ytd-video-renderer, yt-lockup-view-model');
+    return inner.length === 1 ? inner[0] : null;
+  }
 
   const isResultsPage = () => location.pathname === '/results';
   const getSearchRoot = () => document.querySelector('ytd-search');
@@ -161,8 +177,10 @@
     let index = 0;
     for (const el of children) {
       index++;
-      if (VIDEO_TAGS.has(el.tagName) && !el.hidden) {
-        videos.push({ el, index, age: getAge(el) });
+      const video = el.hidden ? null : videoOf(el);
+      el.classList.toggle('ytfix-item', !!video);
+      if (video) {
+        videos.push({ el, index, age: getAge(video) });
       } else {
         el.style.removeProperty('order'); // falls back to CSS default (bottom)
       }
@@ -413,18 +431,64 @@
     };
   }
 
+  // Response parts that hold groups or non-videos: never taken apart.
+  const SKIP_KEYS = new Set([
+    'shelfRenderer', 'reelShelfRenderer', 'richShelfRenderer', 'horizontalCardListRenderer',
+    'gridShelfViewModel', 'verticalListRenderer', 'shortsLockupViewModel', 'reelItemRenderer',
+    'adSlotRenderer', 'promotedSparklesWebRenderer', 'searchPyvRenderer', 'channelRenderer',
+    'playlistRenderer', 'radioRenderer', 'didYouMeanRenderer', 'showingResultsForRenderer',
+    'backgroundPromoRenderer', 'messageRenderer', 'continuationItemRenderer',
+  ]);
+  const SENSITIVE_RE = /blur|sensitive|warning|mature|interstitial/i;
+
+  /** True if any field *name* (not text such as a title) marks the item as blurred or sensitive. */
+  function hasSensitiveKey(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 12) return false;
+    for (const [k, v] of Object.entries(obj)) {
+      if (SENSITIVE_RE.test(k) && v !== false && v !== null) return true;
+      if (typeof v === 'object' && hasSensitiveKey(v, depth + 1)) return true;
+    }
+    return false;
+  }
+
+  /** Finds videos anywhere inside `obj` (they may sit in wrappers such as YouTube's blur wrapper). */
+  function findVideos(obj, sensitive, out, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 15) return;
+    if (Array.isArray(obj)) {
+      for (const x of obj) findVideos(x, sensitive, out, depth + 1);
+      return;
+    }
+    if (obj.videoRenderer || obj.lockupViewModel) {
+      const raw = obj.videoRenderer || obj.lockupViewModel;
+      const v = obj.videoRenderer ? fromVideoRenderer(raw) : fromLockup(raw);
+      if (v) {
+        v.sensitive = sensitive || hasSensitiveKey(raw);
+        out.push(v);
+      }
+      return;
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      if (SKIP_KEYS.has(k) || typeof v !== 'object') continue;
+      findVideos(v, sensitive || SENSITIVE_RE.test(k), out, depth + 1);
+    }
+  }
+
   /** Pulls video items and the next-page token out of a list of section items. */
   function collect(items, out) {
     let token = null;
     for (const it of items || []) {
-      if (it.itemSectionRenderer) {
-        for (const c of it.itemSectionRenderer.contents || []) {
-          const v = c.videoRenderer ? fromVideoRenderer(c.videoRenderer)
-            : c.lockupViewModel ? fromLockup(c.lockupViewModel) : null;
-          if (v) out.push(v);
-        }
-      } else if (it.continuationItemRenderer) {
+      if (it.continuationItemRenderer) {
         token = it.continuationItemRenderer.continuationEndpoint?.continuationCommand?.token || token;
+        continue;
+      }
+      const contents = it.itemSectionRenderer ? it.itemSectionRenderer.contents || [] : [it];
+      for (const c of contents) {
+        const before = out.length;
+        findVideos(c, false, out);
+        // Remember formats that held no videos, to explain an empty list.
+        if (out.length === before && own) {
+          for (const k of Object.keys(c)) if (!SKIP_KEYS.has(k)) own.unknownKinds.add(k);
+        }
       }
     }
     return token;
@@ -455,7 +519,10 @@
     const key = getQuery() + '|' + settings.timeframe;
     if (own && own.key === key) return;
     const run = ++ownRun;
-    own = { key, run, timeframe: settings.timeframe, videos: new Map(), seq: 0, pending: 0, done: false, error: null };
+    own = {
+      key, run, timeframe: settings.timeframe, videos: new Map(), seq: 0,
+      pending: 0, done: false, error: null, unknownKinds: new Set(),
+    };
     const cfg = innertubeConfig();
     const query = getQuery();
     const sources = SOURCES[settings.timeframe];
@@ -514,7 +581,7 @@
 
   function buildCard(v) {
     const a = document.createElement('a');
-    a.className = 'ytfix-card';
+    a.className = 'ytfix-card' + (v.sensitive ? ' ytfix-sensitive' : '');
     a.href = '/watch?v=' + encodeURIComponent(v.id);
 
     const thumb = document.createElement('div');
@@ -567,6 +634,7 @@
     }
     const el = ensureListEl();
     if (!el) return;
+    el.classList.toggle('ytfix-unblur', unblurred);
     if (el.dataset.key !== own.key) {
       el.textContent = '';
       cards.clear();
@@ -590,11 +658,14 @@
       }
       empty.textContent = own.error
         ? `Couldn't load results from YouTube (${own.error.message}). Choose "Any time" to see YouTube's normal list.`
-        : `No videos uploaded in the ${TIMEFRAME_LABEL[own.timeframe]} for this search.`;
+        : `No videos uploaded in the ${TIMEFRAME_LABEL[own.timeframe]} for this search.` +
+          (own.unknownKinds.size ? ` (YouTube also sent results in formats the add-on doesn't read yet: ${[...own.unknownKinds].join(', ')}.)` : '');
     } else {
       empty?.remove();
     }
   }
+
+  let unblurred = false;
 
   const TIMEFRAME_LABEL = { hour: 'last hour', today: 'last 24 hours', week: 'last week' };
 
@@ -632,6 +703,12 @@
       .map(([key, text]) => mk('time-' + key, text, () => {
         setSettings(key === 'any' ? { timeframe: 'any' } : { timeframe: key, sortEnabled: true });
       }));
+    const unblur = mk('unblur', 'Unblur thumbnails', () => {
+      unblurred = !unblurred;
+      renderOwnList();
+      renderBar();
+    });
+    unblur.classList.add('ytfix-more');
     const more = mk('more', 'Load all results', () => {
       if (preloading) { cancelPreload(); scheduleUpdate(); } else preload(ALL_PAGES);
     });
@@ -642,7 +719,7 @@
     const sep = document.createElement('span');
     sep.className = 'ytfix-sep';
 
-    bar.append(mkLabel('Sort by'), relevance, newest, sep, mkLabel('Uploaded'), ...times, more, status);
+    bar.append(mkLabel('Sort by'), relevance, newest, sep, mkLabel('Uploaded'), ...times, more, unblur, status);
   }
 
   function ensureBar() {
@@ -668,6 +745,10 @@
     }
     const more = bar.querySelector('[data-key="more"]');
     const status = bar.querySelector('.ytfix-status');
+    const unblur = bar.querySelector('[data-key="unblur"]');
+    const anySensitive = ownMode && own && [...own.videos.values()].some(v => v.sensitive);
+    unblur.hidden = !anySensitive;
+    unblur.textContent = unblurred ? 'Blur thumbnails' : 'Unblur thumbnails';
     if (navigating) {
       more.hidden = true;
       status.textContent = 'Loading…';

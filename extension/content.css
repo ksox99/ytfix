@@ -19,7 +19,7 @@ ytd-search.ytfix-sorted ytd-continuation-item-renderer {
 
 /* ---- Optional: when sorted, show only videos ---- */
 ytd-search.ytfix-hide-shelves ytd-item-section-renderer > #contents >
-  :not(ytd-video-renderer):not(yt-lockup-view-model):not(ytd-continuation-item-renderer),
+  :not(.ytfix-item):not(ytd-continuation-item-renderer),
 ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
   display: none !important;
 }
@@ -135,6 +135,15 @@ ytd-search.ytfix-own-list ytd-section-list-renderer {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+/* Keep YouTube's blur on sensitive results until the viewer unblurs them. */
+#ytfix-results .ytfix-sensitive .ytfix-thumb img {
+  filter: blur(24px);
+  transform: scale(1.1);
+}
+#ytfix-results.ytfix-unblur .ytfix-sensitive .ytfix-thumb img {
+  filter: none;
+  transform: none;
 }
 #ytfix-results .ytfix-len {
   position: absolute;
