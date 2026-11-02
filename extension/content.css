@@ -40,13 +40,16 @@ ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
 }
 
 /* ---- Toolbar ---- */
-#ytfix-bar {
+#ytfix-bar,
+#ytfix-results {
   --ytfix-fg: #0f0f0f;
   --ytfix-fg-inverse: #fff;
   --ytfix-fg-secondary: #606060;
   --ytfix-chip: rgba(0, 0, 0, 0.05);
   --ytfix-chip-hover: rgba(0, 0, 0, 0.1);
   --ytfix-sep: rgba(0, 0, 0, 0.1);
+}
+#ytfix-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -57,7 +60,8 @@ ytd-search.ytfix-hide-shelves ytd-item-section-renderer > :not(#contents) {
   color: var(--ytfix-fg);
 }
 /* YouTube puts a "dark" attribute on <html> in dark theme. */
-html[dark] #ytfix-bar {
+html[dark] #ytfix-bar,
+html[dark] #ytfix-results {
   --ytfix-fg: #f1f1f1;
   --ytfix-fg-inverse: #0f0f0f;
   --ytfix-fg-secondary: #aaa;
@@ -99,10 +103,85 @@ html[dark] #ytfix-bar {
   font-size: 12px;
 }
 
-/* ---- "Last hour" mode ---- */
-ytd-search.ytfix-navigating ytd-section-list-renderer,
-ytd-search.ytfix-hour ytd-item-section-renderer > #contents > :not(.ytfix-ok):not(ytd-continuation-item-renderer) {
+/* ---- Timeframes: the add-on's own list replaces YouTube's ---- */
+ytd-search.ytfix-own-list ytd-section-list-renderer {
   display: none !important;
+}
+#ytfix-results {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 8px;
+  font-family: "Roboto", "Arial", sans-serif;
+  color: var(--ytfix-fg);
+}
+#ytfix-results .ytfix-card {
+  display: flex;
+  gap: 16px;
+  color: inherit;
+  text-decoration: none;
+}
+#ytfix-results .ytfix-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: min(360px, 45%);
+  aspect-ratio: 16 / 9;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--ytfix-chip);
+}
+#ytfix-results .ytfix-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+#ytfix-results .ytfix-len {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.8);
+}
+#ytfix-results .ytfix-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#ytfix-results .ytfix-title {
+  font-size: 18px;
+  line-height: 26px;
+  font-weight: 400;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#ytfix-results .ytfix-meta,
+#ytfix-results .ytfix-channel {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ytfix-fg-secondary);
+}
+#ytfix-results .ytfix-channel {
+  margin-top: 8px;
+}
+#ytfix-results .ytfix-card:hover .ytfix-title {
+  text-decoration: underline;
+}
+#ytfix-results .ytfix-empty {
+  padding: 24px 0;
+  font-size: 14px;
+  color: var(--ytfix-fg-secondary);
+}
+@media (max-width: 600px) {
+  #ytfix-results .ytfix-card { flex-direction: column; }
+  #ytfix-results .ytfix-thumb { width: 100%; }
 }
 #ytfix-bar .ytfix-sep {
   width: 1px;

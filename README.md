@@ -1,56 +1,52 @@
 # YouTube Sort by Upload Date (Firefox add-on)
 
-YouTube removed **Sort by → Upload date** from search results in January 2026.
-The old `&sp=CAI%253D` URL trick stopped working soon after. This add-on puts
-the option back:
+YouTube removed **Sort by → Upload date** from search in January 2026, and its
+remaining time filters return poor, randomly ordered lists. This add-on puts
+proper newest-first sorting back:
 
 ```
-Sort by [Relevance] [Upload date (newest)] | Uploaded [Any time] [Last hour] [Today] [This week]  [Load all results]  84 videos sorted
+Sort by [Relevance] [Upload date (newest)] | Uploaded [Any time] [Last hour] [Today] [This week]
 ```
 
 ## How it works
 
-YouTube's servers no longer return results in date order, so the add-on sorts them in your browser:
+### Last hour / Today / This week
+YouTube's own *Today* filter misses most fresh uploads and comes in random
+order. So for these buttons the add-on runs the searches itself, using the
+same internal search API the YouTube page uses:
 
-1. It reads each result's "5 hours ago" / "3 days ago" text. This works for
-   English, German, Spanish, Portuguese, French, Italian and Dutch.
-2. It reorders the results newest first. Live streams go on top, and results
-   with no date go at the bottom. Results with the same age ("1 year ago")
-   keep YouTube's relevance order. Elements are only reordered with CSS, never
-   moved, so YouTube's infinite scroll keeps working.
-3. It loads more results automatically:
-   - **With a time filter on** (**Last hour**, or YouTube's own *Today / This
-     week / This month / This year*), it loads **every** result, page by page,
-     until YouTube has no more. Nothing gets missed just because YouTube ranked
-     it low. The toolbar says *"all results loaded"* when it's done.
-   - **Without a time filter**, it loads 3 extra pages (about 80 results).
-     Click **Load all results** to keep going until the end. While it loads,
-     the button becomes **Stop loading**.
+| Button    | Searches merged                              | Shows uploads up to |
+|-----------|----------------------------------------------|---------------------|
+| Last hour | YouTube's (hidden) last-hour filter          | 59 minutes ago      |
+| Today     | last-hour + Today filters                    | 23 hours ago        |
+| This week | last-hour + Today + This week filters        | 6 days ago          |
 
-### Uploaded: Any time / Last hour / Today / This week
-- **Today** and **This week** switch on YouTube's own upload-date filter
-  (it still works, only the sort was removed), then the add-on sorts and loads
-  every result.
-- **Last hour**: YouTube removed this from its menu, but its old filter code
-  still works and returns genuinely fresh uploads. The add-on uses that code,
-  sorts newest first, and hides anything that still says it's older than an
-  hour. This is the best option for "what was just uploaded". YouTube's own
-  **Today** list is much smaller and misses many recent uploads.
+It loads every page of each search, removes duplicates, drops anything
+outside the timeframe, and shows one newest-first list in place of YouTube's.
+So all three buttons have the same freshest videos at the top, and the longer
+timeframes extend the list further back.
 
-YouTube rounds ages down, so "1 hour ago" can mean up to 1 h 59 min. Those
-videos are included in Last hour. Brand-new uploads can take a few minutes to
-show up in YouTube search at all.
+The timeframe you pick stays selected for new searches until you choose
+**Any time** (or **Relevance**).
 
-YouTube's own *Filters → Upload date* (This month / This year) works with
-the add-on too.
+YouTube rounds ages down ("1 hour ago" means 60–119 minutes), which is why
+the cut-offs are 59 minutes, 23 hours and 6 days.
+
+### Any time
+YouTube's normal results, reordered newest first in the page. Live streams go
+on top and undated items go at the end. Results with the same age ("1 year
+ago") keep YouTube's relevance order. The add-on loads 3 extra pages
+automatically. **Load all results** keeps going until YouTube runs out. If
+you use YouTube's own *Filters → Upload date* menu, every result is loaded.
+
+Dates are read in English, German, Spanish, Portuguese, French, Italian and
+Dutch.
 
 ### Limitations
-- Only results that have loaded can be sorted. This is a reordering of
-  YouTube's relevance results, not a server-side "newest" search, so a very new
-  video that YouTube ranks very low may only show up after you load more pages.
-  Use the Upload date filter to narrow things down.
-- YouTube only shows coarse ages ("2 years ago"), so older videos are only
-  roughly in order.
+- The add-on can only show what YouTube's search returns. Brand-new uploads
+  can take a few minutes to show up in YouTube search at all.
+- In Any time mode, YouTube only shows rough ages ("2 years ago"), so older
+  videos are only roughly in order.
 
 ## Install
 
@@ -70,7 +66,8 @@ the add-on too.
 ## Settings
 Go to `about:addons` → *YouTube Sort by Upload Date* → *Preferences*:
 - Turn sorting on or off by default. The toolbar remembers your last choice.
-- Load all results when a time filter is on. On by default.
+- Load all results when YouTube's own Upload date filter is used in Any time
+  mode. On by default.
 - Number of extra pages to load automatically when no time filter is on
   (0–20, default 3).
 - Show only videos while sorted. This hides Shorts shelves, "People also

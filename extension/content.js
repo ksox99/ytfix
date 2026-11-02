@@ -1,23 +1,31 @@
 /*
  * YouTube Sort by Upload Date
  *
- * YouTube removed "Sort by: Upload date" from search in January 2026, and the
- * old `&sp=CAI%253D` URL trick no longer forces chronological order. So this
- * script sorts the results itself:
+ * YouTube removed "Sort by: Upload date" from search in January 2026. This
+ * add-on brings it back in two ways:
  *
- *  1. It reads each result's "3 days ago" style timestamp.
- *  2. It reorders results with CSS `order`. The result list becomes one flex
- *     column (wrappers get `display: contents`). DOM nodes are never moved,
- *     so YouTube's own rendering and infinite scroll keep working.
- *  3. It can preload a few extra pages of results, so the sort covers more
- *     than the first ~20 results.
+ * Any time: YouTube's own result list is reordered newest first in the page
+ *   (CSS `order`, nodes are never moved), and a few more pages are preloaded.
+ *
+ * Last hour / Today / This week: YouTube's time filters return poor lists.
+ *   "Today" misses most fresh uploads, while the old (hidden) "last hour"
+ *   filter returns them. So the add-on runs the relevant filtered searches
+ *   itself, via the same internal API the YouTube page uses, merges them
+ *   (last hour + today + this week), removes duplicates, drops anything
+ *   outside the timeframe, and shows its own newest-first list.
  */
 (() => {
   'use strict';
 
   const api = typeof browser !== 'undefined' ? browser : chrome;
 
-  const DEFAULTS = { sortEnabled: true, preloadPages: 3, hideShelves: true, loadAllWhenFiltered: true };
+  const DEFAULTS = {
+    sortEnabled: true,
+    timeframe: 'any', // 'any' | 'hour' | 'today' | 'week'
+    preloadPages: 3,
+    hideShelves: true,
+    loadAllWhenFiltered: true,
+  };
   let settings = { ...DEFAULTS };
 
   // ---------------------------------------------------------------------------
@@ -83,15 +91,19 @@
     return null;
   }
 
+  const AGE_LIVE = -1;      // live streams first
+  const AGE_UNKNOWN = Infinity;
+
+  // ---------------------------------------------------------------------------
+  // Any time: reorder YouTube's own result list
+  // ---------------------------------------------------------------------------
+
   const META_SEL = [
     '#metadata-line span',                       // classic ytd-video-renderer
     'yt-content-metadata-view-model span',       // new "lockup" layout
     '.yt-content-metadata-view-model-wiz__metadata-text',
     '.yt-content-metadata-view-model__metadata-text',
   ].join(',');
-
-  const AGE_LIVE = -1;      // live streams first
-  const AGE_UNKNOWN = Infinity;
 
   // Places a date never comes from: titles and description snippets.
   const NOT_META = 'h3, #video-title, [class*="title"], .metadata-snippet-container, ' +
@@ -121,67 +133,51 @@
     return AGE_UNKNOWN; // upcoming premieres, playlists, etc.
   }
 
-  // ---------------------------------------------------------------------------
-  // Sorting
-  // ---------------------------------------------------------------------------
-
   const ITEM_SEL = 'ytd-item-section-renderer > #contents > *';
   const VIDEO_TAGS = new Set(['YTD-VIDEO-RENDERER', 'YT-LOCKUP-VIEW-MODEL']);
 
   const isResultsPage = () => location.pathname === '/results';
   const getSearchRoot = () => document.querySelector('ytd-search');
-
-  // ---------------------------------------------------------------------------
-  // Upload-time buttons: Any time / Last hour / Today / This week
-  // ---------------------------------------------------------------------------
-  // Each button applies a YouTube upload-date filter code. YouTube's menu no
-  // longer offers "Last hour", but its old code still works and returns
-  // genuinely fresh uploads. YouTube's "Today" list is much worse. In Last
-  // hour mode the add-on also hides anything its date says is older than an
-  // hour, in case YouTube slips some in.
-
-  const SP_HOUR = 'EgIIAQ==';
-  const SP_TODAY = 'EgIIAg==';
-  const SP_WEEK = 'EgIIAw==';
-  const DATE_HOUR = 1, DATE_TODAY = 2, DATE_WEEK = 3;
-  const ONE_HOUR = 3600;
-  const ALL_PAGES = 60; // "load everything" safety cap (~1200 results)
-  let navigating = false;
-
   const getQuery = () => new URLSearchParams(location.search).get('search_query') || '';
+  const ownListActive = () => isResultsPage() && settings.timeframe !== 'any';
 
-  const hourMode = () => isResultsPage() && uploadDateFilter() === DATE_HOUR;
+  let lastStats = { total: 0, dated: 0 };
 
-  /** Which upload-time button is active: 'any', 'hour', 'today', 'week' or '' (YouTube's month/year). */
-  function timeMode() {
-    switch (uploadDateFilter()) {
-      case 0: return 'any';
-      case DATE_HOUR: return 'hour';
-      case DATE_TODAY: return 'today';
-      case DATE_WEEK: return 'week';
-      default: return '';
+  function applySort() {
+    const root = getSearchRoot();
+    if (!root) return;
+    const own = ownListActive();
+    const sort = settings.sortEnabled && isResultsPage() && !own;
+    root.classList.toggle('ytfix-own-list', own);
+    root.classList.toggle('ytfix-sorted', sort);
+    root.classList.toggle('ytfix-hide-shelves', sort && settings.hideShelves);
+
+    const children = root.querySelectorAll(ITEM_SEL);
+    if (!sort) {
+      for (const el of children) el.style.removeProperty('order');
+      return;
     }
-  }
-
-  function goSearch(sp) {
-    // The old results stay on screen until the new page loads, so hide them.
-    getSearchRoot()?.classList.add('ytfix-navigating');
-    navigating = true;
-    renderBar();
-    const u = new URL('/results', location.origin);
-    u.searchParams.set('search_query', getQuery());
-    if (sp) u.searchParams.set('sp', sp);
-    location.assign(u.href);
-  }
-
-  function setTimeMode(mode) {
-    if (mode === timeMode()) return;
-    cancelPreload();
-    goSearch({ hour: SP_HOUR, today: SP_TODAY, week: SP_WEEK }[mode] || null);
+    const videos = [];
+    let index = 0;
+    for (const el of children) {
+      index++;
+      if (VIDEO_TAGS.has(el.tagName) && !el.hidden) {
+        videos.push({ el, index, age: getAge(el) });
+      } else {
+        el.style.removeProperty('order'); // falls back to CSS default (bottom)
+      }
+    }
+    // Newest first; ties keep YouTube's relevance order.
+    videos.sort((a, b) => (a.age - b.age) || (a.index - b.index));
+    videos.forEach((v, rank) => {
+      const order = String(rank + 1);
+      if (v.el.style.order !== order) v.el.style.order = order;
+    });
+    lastStats = { total: videos.length, dated: videos.filter(v => v.age !== AGE_UNKNOWN).length };
   }
 
   // ---------------------------------------------------------------------------
-  // Detecting YouTube's own upload-date filter
+  // Detecting YouTube's own upload-date filter in the URL (Any time mode)
   // ---------------------------------------------------------------------------
   // The `sp` URL parameter is a base64 protobuf. Field 2 holds the filters,
   // and its field 1 is the upload date (1 = last hour, 2 = today, 3 = week,
@@ -229,74 +225,18 @@
     }
   }
 
-  /** True when results are limited in time, so loading all of them is cheap and useful. */
-  const timeFiltered = () => isResultsPage() && (hourMode() || uploadDateFilter() > 0);
-
   // ---------------------------------------------------------------------------
-  // Applying sort + filter
-  // ---------------------------------------------------------------------------
-
-  let lastStats = { total: 0, dated: 0, shown: 0, unreadable: false };
-
-  function applySort() {
-    const root = getSearchRoot();
-    if (!root) return;
-    const results = isResultsPage();
-    const sort = settings.sortEnabled && results;
-    const hour = hourMode();
-    root.classList.toggle('ytfix-sorted', sort);
-    root.classList.toggle('ytfix-hide-shelves', (sort || hour) && settings.hideShelves);
-    // In Last hour mode, CSS hides every video until it's marked .ytfix-ok
-    // below. Videos that are too old never appear, not even briefly.
-    root.classList.toggle('ytfix-hour', hour);
-
-    const children = root.querySelectorAll(ITEM_SEL);
-    const videos = [];
-    let index = 0;
-    for (const el of children) {
-      index++;
-      if (VIDEO_TAGS.has(el.tagName) && !el.hidden) {
-        videos.push({ el, index, age: getAge(el) });
-      } else {
-        el.style.removeProperty('order'); // falls back to CSS default (bottom)
-      }
-    }
-
-    // If no dates can be read at all, YouTube's layout probably changed. Show
-    // everything rather than an empty page.
-    const anyDated = videos.some(v => v.age !== AGE_UNKNOWN);
-    const isRecent = v => (v.age >= 0 && v.age <= ONE_HOUR) || (v.age === AGE_UNKNOWN && !anyDated);
-    for (const v of videos) v.el.classList.toggle('ytfix-ok', hour && isRecent(v));
-
-    if (sort) {
-      // Newest first; ties keep YouTube's relevance order.
-      const sorted = [...videos].sort((a, b) => (a.age - b.age) || (a.index - b.index));
-      sorted.forEach((v, rank) => {
-        const order = String(rank + 1);
-        if (v.el.style.order !== order) v.el.style.order = order;
-      });
-    } else {
-      for (const v of videos) v.el.style.removeProperty('order');
-    }
-
-    lastStats = {
-      total: videos.length,
-      dated: videos.filter(v => v.age !== AGE_UNKNOWN).length,
-      shown: hour ? videos.filter(isRecent).length : videos.length,
-      unreadable: !anyDated && videos.length > 0,
-    };
-  }
-
-  // ---------------------------------------------------------------------------
-  // Preloading more result pages
+  // Any time: preloading more pages of YouTube's own list
   // ---------------------------------------------------------------------------
   // YouTube loads the next page when its continuation spinner scrolls into
   // view (IntersectionObserver). We pin the spinner invisibly inside the
   // viewport for a moment, which loads the next page without scrolling.
 
+  const ALL_PAGES = 60; // "load everything" safety cap (~1200 results)
   let preloadRun = 0;
   let preloading = false;
-  let exhausted = false; // YouTube has no more results for this search
+  let exhausted = false;
+  let navigating = false;
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -344,6 +284,321 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Timeframes: fetching and merging filtered searches
+  // ---------------------------------------------------------------------------
+
+  const SP = { hour: 'EgIIAQ==', today: 'EgIIAg==', week: 'EgIIAw==' };
+  // Which filtered searches feed each timeframe (freshest first).
+  const SOURCES = { hour: ['hour'], today: ['hour', 'today'], week: ['hour', 'today', 'week'] };
+  // Ages must be below these. YouTube rounds down ("1 hour ago" means 60-119
+  // minutes), so the last hour shows up to "59 minutes ago", today up to
+  // "23 hours ago" and this week up to "6 days ago".
+  const MAX_AGE = { hour: S.hour, today: S.day, week: S.week };
+  const MAX_PAGES_PER_SEARCH = 40;
+
+  // Use the page's own fetch, so requests look exactly like YouTube's (Firefox).
+  // eslint-disable-next-line no-undef
+  const pageFetch = (typeof content !== 'undefined' && content && content.fetch)
+    // eslint-disable-next-line no-undef
+    ? content.fetch.bind(content) : window.fetch.bind(window);
+
+  function scriptText() {
+    let all = '';
+    for (const s of document.querySelectorAll('script:not([src])')) {
+      const t = s.textContent;
+      if (t.includes('INNERTUBE')) all += t;
+    }
+    return all;
+  }
+
+  function innertubeConfig() {
+    let context = null, apiKey = null, clientVersion = null;
+    try {
+      const ytcfg = (window.wrappedJSObject || window).ytcfg;
+      if (ytcfg && ytcfg.get) {
+        const c = ytcfg.get('INNERTUBE_CONTEXT');
+        if (c) context = JSON.parse(JSON.stringify(c));
+        apiKey = ytcfg.get('INNERTUBE_API_KEY') || null;
+        clientVersion = ytcfg.get('INNERTUBE_CLIENT_VERSION') || null;
+      }
+    } catch (_) { /* fall back to parsing the page */ }
+    if (!context || !clientVersion) {
+      const text = scriptText();
+      const pick = re => (text.match(re) || [])[1] || null;
+      clientVersion = clientVersion || pick(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/) || '2.20260101.00.00';
+      apiKey = apiKey || pick(/"INNERTUBE_API_KEY":"([^"]+)"/);
+      context = context || {
+        client: {
+          clientName: 'WEB',
+          clientVersion,
+          hl: pick(/"HL":"([^"]+)"/) || document.documentElement.lang || 'en',
+          gl: pick(/"GL":"([^"]+)"/) || 'US',
+        },
+      };
+    }
+    return { context, apiKey, clientVersion: clientVersion || context.client?.clientVersion };
+  }
+
+  async function innertubeSearch(cfg, body) {
+    const url = location.origin + '/youtubei/v1/search?prettyPrint=false' +
+      (cfg.apiKey ? '&key=' + encodeURIComponent(cfg.apiKey) : '');
+    const res = await pageFetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Youtube-Client-Name': '1',
+        'X-Youtube-Client-Version': cfg.clientVersion,
+      },
+      body: JSON.stringify({ context: cfg.context, ...body }),
+    });
+    if (!res.ok) throw new Error('YouTube search returned ' + res.status);
+    return JSON.parse(await res.text());
+  }
+
+  const txt = t => {
+    if (!t) return '';
+    if (typeof t.simpleText === 'string') return t.simpleText;
+    if (Array.isArray(t.runs)) return t.runs.map(r => r.text).join('');
+    return typeof t.content === 'string' ? t.content : '';
+  };
+
+  function fromVideoRenderer(r) {
+    if (!r.videoId) return null;
+    const badges = JSON.stringify(r.badges || []) + JSON.stringify(r.thumbnailOverlays || []);
+    const published = txt(r.publishedTimeText);
+    const views = txt(r.shortViewCountText) || txt(r.viewCountText);
+    const live = /LIVE_NOW|"LIVE"/.test(badges) || (!published && LIVE_RE.test(views));
+    return {
+      id: r.videoId,
+      title: txt(r.title),
+      channel: txt(r.ownerText) || txt(r.longBylineText),
+      views,
+      published,
+      length: txt(r.lengthText),
+      age: live ? AGE_LIVE : (parseAge(published) ?? AGE_UNKNOWN),
+    };
+  }
+
+  function stringsIn(obj, out = []) {
+    if (!obj || typeof obj !== 'object') return out;
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'string' && (k === 'content' || k === 'text' || k === 'simpleText')) out.push(v);
+      else if (typeof v === 'object') stringsIn(v, out);
+    }
+    return out;
+  }
+
+  function fromLockup(l) {
+    if (!l.contentId || l.contentType !== 'LOCKUP_CONTENT_TYPE_VIDEO') return null;
+    const meta = l.metadata?.lockupMetadataViewModel;
+    const rows = meta?.metadata?.contentMetadataViewModel?.metadataRows || [];
+    const parts = rows.flatMap(r => (r.metadataParts || []).map(p => p.text?.content || '')).filter(Boolean);
+    let age = AGE_UNKNOWN, published = '', views = '';
+    for (const p of parts) {
+      const a = parseAge(p);
+      if (a !== null && age === AGE_UNKNOWN) { age = a; published = p; }
+      else if (LIVE_RE.test(p)) { age = AGE_LIVE; views = p; }
+      else if (/view|aufruf|vista|vue|visualiza/i.test(p)) views = p;
+    }
+    const imageStrings = stringsIn(l.contentImage);
+    return {
+      id: l.contentId,
+      title: meta?.title?.content || '',
+      channel: parts[0] || '',
+      views,
+      published,
+      length: imageStrings.find(s => /^\d+(:\d\d){1,2}$/.test(s)) || '',
+      age,
+    };
+  }
+
+  /** Pulls video items and the next-page token out of a list of section items. */
+  function collect(items, out) {
+    let token = null;
+    for (const it of items || []) {
+      if (it.itemSectionRenderer) {
+        for (const c of it.itemSectionRenderer.contents || []) {
+          const v = c.videoRenderer ? fromVideoRenderer(c.videoRenderer)
+            : c.lockupViewModel ? fromLockup(c.lockupViewModel) : null;
+          if (v) out.push(v);
+        }
+      } else if (it.continuationItemRenderer) {
+        token = it.continuationItemRenderer.continuationEndpoint?.continuationCommand?.token || token;
+      }
+    }
+    return token;
+  }
+
+  function parseFirstPage(json) {
+    const items = json?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
+    const out = [];
+    const token = collect(items, out);
+    return { videos: out, token };
+  }
+
+  function parseNextPage(json) {
+    const out = [];
+    let token = null;
+    for (const cmd of json?.onResponseReceivedCommands || []) {
+      const items = cmd.appendContinuationItemsAction?.continuationItems;
+      if (items) token = collect(items, out) || token;
+    }
+    return { videos: out, token };
+  }
+
+  // State of the own list for the current query + timeframe.
+  let own = null; // { key, run, videos: Map, order, pending, done, error }
+  let ownRun = 0;
+
+  function startOwnList() {
+    const key = getQuery() + '|' + settings.timeframe;
+    if (own && own.key === key) return;
+    const run = ++ownRun;
+    own = { key, run, timeframe: settings.timeframe, videos: new Map(), seq: 0, pending: 0, done: false, error: null };
+    const cfg = innertubeConfig();
+    const query = getQuery();
+    const sources = SOURCES[settings.timeframe];
+    own.pending = sources.length;
+    renderOwnList();
+    for (const src of sources) {
+      searchAll(cfg, query, SP[src], run).catch(err => {
+        if (own?.run === run) own.error = err;
+      }).finally(() => {
+        if (own?.run !== run) return;
+        own.pending--;
+        if (own.pending === 0) own.done = true;
+        renderOwnList();
+        renderBar();
+      });
+    }
+  }
+
+  async function searchAll(cfg, query, params, run) {
+    let page = parseFirstPage(await innertubeSearch(cfg, { query, params }));
+    for (let n = 0; ; n++) {
+      if (own?.run !== run) return;
+      addVideos(page.videos);
+      if (!page.token || n + 1 >= MAX_PAGES_PER_SEARCH) return;
+      await sleep(120);
+      if (own?.run !== run) return;
+      page = parseNextPage(await innertubeSearch(cfg, { continuation: page.token }));
+    }
+  }
+
+  function addVideos(list) {
+    const maxAge = MAX_AGE[own.timeframe];
+    for (const v of list) {
+      if (own.videos.has(v.id)) continue;
+      // Only uploads inside the timeframe. Live streams and undated items are left out.
+      if (!(v.age >= 0 && v.age < maxAge)) continue;
+      v.seq = own.seq++;
+      own.videos.set(v.id, v);
+    }
+    scheduleOwnRender();
+  }
+
+  let ownRenderPending = false;
+  function scheduleOwnRender() {
+    if (ownRenderPending) return;
+    ownRenderPending = true;
+    setTimeout(() => { ownRenderPending = false; renderOwnList(); renderBar(); }, 100);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Timeframes: rendering the own list
+  // ---------------------------------------------------------------------------
+
+  let listEl = null;
+  const cards = new Map(); // video id -> element
+
+  function buildCard(v) {
+    const a = document.createElement('a');
+    a.className = 'ytfix-card';
+    a.href = '/watch?v=' + encodeURIComponent(v.id);
+
+    const thumb = document.createElement('div');
+    thumb.className = 'ytfix-thumb';
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = '';
+    img.src = 'https://i.ytimg.com/vi/' + encodeURIComponent(v.id) + '/mqdefault.jpg';
+    thumb.append(img);
+    if (v.length) {
+      const len = document.createElement('span');
+      len.className = 'ytfix-len';
+      len.textContent = v.length;
+      thumb.append(len);
+    }
+
+    const info = document.createElement('div');
+    info.className = 'ytfix-info';
+    const title = document.createElement('div');
+    title.className = 'ytfix-title';
+    title.textContent = v.title;
+    const meta = document.createElement('div');
+    meta.className = 'ytfix-meta';
+    meta.textContent = [v.views, v.published].filter(Boolean).join(' • ');
+    const channel = document.createElement('div');
+    channel.className = 'ytfix-channel';
+    channel.textContent = v.channel;
+    info.append(title, meta, channel);
+
+    a.append(thumb, info);
+    return a;
+  }
+
+  function ensureListEl() {
+    const primary = getSearchRoot()?.querySelector('#primary');
+    if (!primary) return null;
+    if (!listEl) {
+      listEl = document.createElement('div');
+      listEl.id = 'ytfix-results';
+    }
+    if (bar && bar.isConnected && bar.nextSibling !== listEl) bar.after(listEl);
+    else if (!listEl.isConnected) primary.prepend(listEl);
+    return listEl;
+  }
+
+  function renderOwnList() {
+    if (!ownListActive() || !own) {
+      listEl?.remove();
+      return;
+    }
+    const el = ensureListEl();
+    if (!el) return;
+    if (el.dataset.key !== own.key) {
+      el.textContent = '';
+      cards.clear();
+      el.dataset.key = own.key;
+    }
+    const sorted = [...own.videos.values()].sort((a, b) => (a.age - b.age) || (a.seq - b.seq));
+    let prev = null;
+    for (const v of sorted) {
+      let card = cards.get(v.id);
+      if (!card) { card = buildCard(v); cards.set(v.id, card); }
+      const want = prev ? prev.nextSibling : el.firstChild;
+      if (want !== card) el.insertBefore(card, want);
+      prev = card;
+    }
+    let empty = el.querySelector('.ytfix-empty');
+    if (own.done && sorted.length === 0) {
+      if (!empty) {
+        empty = document.createElement('div');
+        empty.className = 'ytfix-empty';
+        el.append(empty);
+      }
+      empty.textContent = own.error
+        ? `Couldn't load results from YouTube (${own.error.message}). Choose "Any time" to see YouTube's normal list.`
+        : `No videos uploaded in the ${TIMEFRAME_LABEL[own.timeframe]} for this search.`;
+    } else {
+      empty?.remove();
+    }
+  }
+
+  const TIMEFRAME_LABEL = { hour: 'last hour', today: 'last 24 hours', week: 'last week' };
+
+  // ---------------------------------------------------------------------------
   // Toolbar UI
   // ---------------------------------------------------------------------------
 
@@ -359,87 +614,79 @@
       s.textContent = text;
       return s;
     };
-
-    const mk = (key, text) => {
+    const mk = (key, text, onClick) => {
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'ytfix-chip';
       b.dataset.key = key;
       b.textContent = text;
+      b.addEventListener('click', onClick);
       return b;
     };
-    const relevance = mk('relevance', 'Relevance');
-    const newest = mk('newest', 'Upload date (newest)');
+
+    const relevance = mk('relevance', 'Relevance', () => {
+      setSettings({ sortEnabled: false, timeframe: 'any' });
+    });
+    const newest = mk('newest', 'Upload date (newest)', () => setSettings({ sortEnabled: true }));
     const times = [['any', 'Any time'], ['hour', 'Last hour'], ['today', 'Today'], ['week', 'This week']]
-      .map(([key, text]) => {
-        const b = mk('time-' + key, text);
-        b.addEventListener('click', () => setTimeMode(key));
-        return b;
-      });
-    const more = mk('more', 'Load all results');
+      .map(([key, text]) => mk('time-' + key, text, () => {
+        setSettings(key === 'any' ? { timeframe: 'any' } : { timeframe: key, sortEnabled: true });
+      }));
+    const more = mk('more', 'Load all results', () => {
+      if (preloading) { cancelPreload(); scheduleUpdate(); } else preload(ALL_PAGES);
+    });
     more.classList.add('ytfix-more');
 
     const status = document.createElement('span');
     status.className = 'ytfix-status';
-
-    relevance.addEventListener('click', () => setSortEnabled(false));
-    newest.addEventListener('click', () => setSortEnabled(true));
-    more.addEventListener('click', () => {
-      if (preloading) { cancelPreload(); scheduleUpdate(); }
-      else preload(ALL_PAGES);
-    });
-
     const sep = document.createElement('span');
     sep.className = 'ytfix-sep';
 
-    bar.append(mkLabel('Sort by'), relevance, newest, sep,
-      mkLabel('Uploaded'), ...times, more, status);
+    bar.append(mkLabel('Sort by'), relevance, newest, sep, mkLabel('Uploaded'), ...times, more, status);
   }
 
   function ensureBar() {
     if (!isResultsPage()) {
       bar?.remove();
+      listEl?.remove();
       return;
     }
     const primary = getSearchRoot()?.querySelector('#primary');
     if (!primary) return;
     if (!bar) buildBar();
     if (bar.parentNode !== primary || primary.firstElementChild !== bar) primary.prepend(bar);
-    renderBar();
   }
 
   function renderBar() {
     if (!bar) return;
-    const on = settings.sortEnabled;
-    const hour = hourMode();
-    bar.querySelector('[data-key="relevance"]').classList.toggle('ytfix-active', !on);
-    bar.querySelector('[data-key="newest"]').classList.toggle('ytfix-active', on);
-    const time = timeMode();
+    const tf = settings.timeframe;
+    const ownMode = tf !== 'any';
+    bar.querySelector('[data-key="relevance"]').classList.toggle('ytfix-active', !settings.sortEnabled && !ownMode);
+    bar.querySelector('[data-key="newest"]').classList.toggle('ytfix-active', settings.sortEnabled || ownMode);
     for (const key of ['any', 'hour', 'today', 'week']) {
-      bar.querySelector(`[data-key="time-${key}"]`).classList.toggle('ytfix-active', time === key);
+      bar.querySelector(`[data-key="time-${key}"]`).classList.toggle('ytfix-active', tf === key);
     }
     const more = bar.querySelector('[data-key="more"]');
-    more.hidden = (!on && !hour) || (exhausted && !preloading);
-    more.textContent = preloading ? 'Stop loading' : 'Load all results';
     const status = bar.querySelector('.ytfix-status');
     if (navigating) {
       more.hidden = true;
       status.textContent = 'Loading…';
       return;
     }
-    const { total, dated, shown, unreadable } = lastStats;
+    if (ownMode) {
+      more.hidden = true;
+      const n = own ? own.videos.size : 0;
+      const label = TIMEFRAME_LABEL[tf];
+      if (!own || !own.done) status.textContent = `${n} from the ${label} so far · searching…`;
+      else status.textContent = `${n} videos from the ${label}, newest first · all results loaded` +
+        (own.error && n ? ' (some searches failed)' : '');
+      return;
+    }
+    more.hidden = !settings.sortEnabled || (exhausted && !preloading);
+    more.textContent = preloading ? 'Stop loading' : 'Load all results';
+    const { total, dated } = lastStats;
     const done = exhausted && !preloading ? ' · all results loaded' : '';
-    if (hour) {
-      if (unreadable) {
-        status.textContent = `Couldn't read upload dates, showing all ${total} results`;
-      } else if (preloading) {
-        status.textContent = `${shown} from the last hour so far · checked ${total} of YouTube's results…`;
-      } else if (shown === 0) {
-        status.textContent = `Nothing from the last hour among ${total} results${done}`;
-      } else {
-        status.textContent = `${shown} from the last hour (checked ${total})${done}`;
-      }
-    } else if (!on) {
+    if (!settings.sortEnabled) {
       status.textContent = '';
     } else if (preloading) {
       status.textContent = `Loading results… (${total} so far)`;
@@ -450,13 +697,29 @@
     }
   }
 
-  function setSortEnabled(on) {
-    if (settings.sortEnabled === on) return;
-    settings.sortEnabled = on;
-    try { api.storage.local.set({ sortEnabled: on }); } catch (_) { /* ignore */ }
-    if (!on) cancelPreload();
+  function setSettings(changes) {
+    const before = { ...settings };
+    Object.assign(settings, changes);
+    try { api.storage.local.set(changes); } catch (_) { /* ignore */ }
+    applyModeChange(before);
+  }
+
+  function applyModeChange(before) {
+    if (settings.timeframe !== 'any') {
+      cancelPreload();
+      startOwnList();
+    } else {
+      own = null;
+      ownRun++;
+      const wasOwn = before.timeframe !== 'any';
+      const sortTurnedOn = settings.sortEnabled && !before.sortEnabled;
+      if (!settings.sortEnabled) cancelPreload();
+      else if ((wasOwn || sortTurnedOn) && settings.preloadPages > 0 && !preloading) {
+        exhausted = false;
+        preload(settings.preloadPages);
+      }
+    }
     update();
-    if (on && settings.preloadPages > 0) preload(settings.preloadPages);
   }
 
   // ---------------------------------------------------------------------------
@@ -466,6 +729,8 @@
   function update() {
     ensureBar();
     applySort();
+    if (ownListActive()) startOwnList();
+    renderOwnList();
     renderBar();
   }
 
@@ -480,11 +745,10 @@
     cancelPreload();
     exhausted = false;
     scheduleUpdate();
-    if (timeFiltered() && settings.loadAllWhenFiltered) {
-      preload(ALL_PAGES); // time-limited search: dig until YouTube runs out
-    } else if (hourMode()) {
-      preload(ALL_PAGES); // dig until YouTube runs out of results
-    } else if (isResultsPage() && settings.sortEnabled && settings.preloadPages > 0) {
+    if (!isResultsPage() || ownListActive()) return; // own list starts in update()
+    if (uploadDateFilter() > 0 && settings.loadAllWhenFiltered) {
+      preload(ALL_PAGES); // YouTube's own time filter is on: load everything
+    } else if (settings.sortEnabled && settings.preloadPages > 0) {
       preload(settings.preloadPages);
     }
   }
@@ -498,10 +762,16 @@
     try {
       api.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
+        const before = { ...settings };
+        let modeChanged = false;
         for (const k of Object.keys(DEFAULTS)) {
-          if (k in changes) settings[k] = changes[k].newValue;
+          if (k in changes && settings[k] !== changes[k].newValue) {
+            settings[k] = changes[k].newValue;
+            if (k === 'timeframe' || k === 'sortEnabled') modeChanged = true;
+          }
         }
-        scheduleUpdate();
+        if (modeChanged) applyModeChange(before);
+        else scheduleUpdate();
       });
     } catch (_) { /* ignore */ }
 
