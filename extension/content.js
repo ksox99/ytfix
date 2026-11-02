@@ -25,6 +25,7 @@
     preloadPages: 3,
     hideShelves: true,
     loadAllWhenFiltered: true,
+    backoffUntil: 0, // set when YouTube says "too many requests"; shared by all tabs
   };
   let settings = { ...DEFAULTS };
 
@@ -155,7 +156,7 @@
   const isResultsPage = () => location.pathname === '/results';
   const getSearchRoot = () => document.querySelector('ytd-search');
   const getQuery = () => new URLSearchParams(location.search).get('search_query') || '';
-  const ownListActive = () => isResultsPage() && settings.timeframe !== 'any';
+  const ownListActive = () => isResultsPage() && settings.timeframe !== 'any' && !isBackedOff();
 
   let lastStats = { total: 0, dated: 0 };
 
@@ -281,6 +282,9 @@
         const cont = await waitFor(findContinuation, 6000);
         if (run !== preloadRun || location.href !== url) break;
         if (!cont) { exhausted = true; break; }
+        if (isBackedOff()) break;
+        await sleep(PAGE_DELAY);
+        if (run !== preloadRun) break;
         cont.classList.add('ytfix-trigger');
         const loaded = await waitFor(() => !cont.isConnected || findContinuation() !== cont, 10000);
         cont.classList.remove('ytfix-trigger');
@@ -312,7 +316,29 @@
   // minutes), so the last hour shows up to "59 minutes ago", today up to
   // "23 hours ago" and this week up to "6 days ago".
   const MAX_AGE = { hour: S.hour, today: S.day, week: S.week };
-  const MAX_PAGES_PER_SEARCH = 40;
+  // Keep the request count close to a person scrolling: a few pages per
+  // search, a pause between requests, results reused for a while, and a full
+  // stop if YouTube complains.
+  const PAGES_PER_STEP = 5;          // pages per search, and per "Load more results" click
+  const PAGE_DELAY = 500;            // ms between background requests
+  const CACHE_TTL = 10 * 60 * 1000;  // reuse a search's results for 10 minutes
+  const BACKOFF = 15 * 60 * 1000;    // pause background searches this long after a 429
+
+  class ThrottledError extends Error {}
+
+  const isBackedOff = () => settings.backoffUntil > Date.now();
+
+  function noteThrottled() {
+    const until = Date.now() + BACKOFF;
+    settings.backoffUntil = until;
+    try { api.storage.local.set({ backoffUntil: until }); } catch (_) { /* ignore */ }
+    setTimeout(scheduleUpdate, BACKOFF + 1000);
+    throw new ThrottledError('YouTube asked to slow down');
+  }
+
+  function checkThrottle(res) {
+    if (res.status === 429 || /\/sorry\//.test(res.url || '')) noteThrottled();
+  }
 
   // Use the page's own fetch, so requests look exactly like YouTube's (Firefox).
   // eslint-disable-next-line no-undef
@@ -396,7 +422,9 @@
   async function resultsPageData(query, params) {
     const url = location.origin + '/results?search_query=' + encodeURIComponent(query) +
       '&sp=' + encodeURIComponent(params);
+    if (isBackedOff()) throw new ThrottledError('paused');
     const res = await pageFetch(url, { credentials: 'include' });
+    checkThrottle(res);
     if (!res.ok) throw new Error('YouTube results page returned ' + res.status);
     const html = await res.text();
     const m = html.match(/ytInitialData"?\]?\s*=\s*(\{.+?\});\s*<\/script>/s);
@@ -404,6 +432,7 @@
   }
 
   async function innertubeSearch(cfg, body) {
+    if (isBackedOff()) throw new ThrottledError('paused');
     const url = location.origin + '/youtubei/v1/search?prettyPrint=false' +
       (cfg.apiKey ? '&key=' + encodeURIComponent(cfg.apiKey) : '');
     const res = await pageFetch(url, {
@@ -417,6 +446,7 @@
       },
       body: JSON.stringify({ context: cfg.context, ...body }),
     });
+    checkThrottle(res);
     if (!res.ok) throw new Error('YouTube search returned ' + res.status);
     return JSON.parse(await res.text());
   }
@@ -558,65 +588,128 @@
     return { videos: out, token };
   }
 
-  // State of the own list for the current query + timeframe.
-  let own = null; // { key, run, videos: Map, order, pending, done, error }
-  let ownRun = 0;
+  // ---- Search cache: one entry per (query, filter), shared by all timeframes ----
+  const searchCache = new Map();
 
-  function startOwnList() {
-    const key = getQuery() + '|' + settings.timeframe;
-    if (own && own.key === key) return;
-    const run = ++ownRun;
-    own = {
-      key, run, timeframe: settings.timeframe, videos: new Map(), seq: 0,
-      pending: 0, done: false, error: null, unknownKinds: new Set(),
-    };
-    const cfg = innertubeConfig();
-    const query = getQuery();
-    const sources = SOURCES[settings.timeframe];
-    own.pending = sources.length;
-    renderOwnList();
-    for (const src of sources) {
-      searchAll(cfg, query, SP[src], run).catch(err => {
-        if (own?.run === run) own.error = err;
-      }).finally(() => {
-        if (own?.run !== run) return;
-        own.pending--;
-        if (own.pending === 0) own.done = true;
-        renderOwnList();
-        renderBar();
-      });
+  function cacheEntry(query, params) {
+    const key = query + '\n' + params;
+    let e = searchCache.get(key);
+    if (!e || Date.now() - e.time > CACHE_TTL) {
+      e = { time: Date.now(), videos: [], token: null, started: false, done: false, pages: 0, busy: null };
+      searchCache.set(key, e);
     }
+    return e;
   }
 
-  async function searchAll(cfg, query, params, run) {
+  let lastRequest = 0;
+  async function pace() {
+    const wait = lastRequest + PAGE_DELAY - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastRequest = Date.now();
+  }
+
+  /** Loads pages for one search until it has `targetPages` pages or YouTube has no more. */
+  async function fillEntry(e, cfg, query, params, targetPages, isCurrent, onPage) {
+    while (e.busy) await e.busy.catch(() => {});
+    if (e.done || e.pages >= targetPages || !isCurrent()) return;
+    e.busy = (async () => {
+      while (!e.done && e.pages < targetPages && isCurrent()) {
+        await pace();
+        if (!isCurrent()) break;
+        let page;
+        if (!e.started) page = await firstPage(cfg, query, params);
+        else page = parseNextPage(await innertubeSearch(cfg, { continuation: e.token }));
+        e.started = true;
+        e.pages++;
+        e.token = page.token;
+        if (!page.token) e.done = true;
+        e.videos.push(...page.videos);
+        onPage(page.videos);
+      }
+    })();
+    try { await e.busy; } finally { e.busy = null; }
+  }
+
+  async function firstPage(cfg, query, params) {
     let page = { videos: [], token: null };
     let apiError = null;
     try {
       page = parseFirstPage(await innertubeSearch(cfg, { query, params }));
     } catch (err) {
+      if (err instanceof ThrottledError) throw err;
       apiError = err;
     }
     if (page.videos.length === 0) {
       // Nothing from the API (for example, sign-in-only results): try the normal results page.
       try {
+        await pace();
         const data = await resultsPageData(query, params);
         if (data) {
           const fromPage = parseFirstPage(data);
           if (fromPage.videos.length || fromPage.token) page = fromPage;
         }
       } catch (err) {
-        if (apiError) throw apiError;
+        if (err instanceof ThrottledError || apiError) throw err instanceof ThrottledError ? err : apiError;
       }
       if (apiError && page.videos.length === 0 && !page.token) throw apiError;
     }
-    for (let n = 0; ; n++) {
-      if (own?.run !== run) return;
-      addVideos(page.videos);
-      if (!page.token || n + 1 >= MAX_PAGES_PER_SEARCH) return;
-      await sleep(120);
-      if (own?.run !== run) return;
-      page = parseNextPage(await innertubeSearch(cfg, { continuation: page.token }));
+    return page;
+  }
+
+  // ---- The own list for the current query + timeframe ----
+  let own = null;
+  let ownRun = 0;
+
+  function startOwnList() {
+    const key = getQuery() + '|' + settings.timeframe;
+    if (own && own.key === key) return;
+    own = {
+      key, run: ++ownRun, timeframe: settings.timeframe, query: getQuery(),
+      videos: new Map(), seq: 0, targetPages: PAGES_PER_STEP,
+      loading: false, done: false, moreAvailable: false, error: null, unknownKinds: new Set(),
+    };
+    renderOwnList();
+    loadOwn();
+  }
+
+  /** Fills each search (freshest filter first, one at a time) up to the target page count. */
+  async function loadOwn() {
+    const o = own;
+    if (!o || o.loading) return;
+    o.loading = true;
+    o.done = false;
+    renderBar();
+    const isCurrent = () => own === o;
+    const cfg = innertubeConfig();
+    for (const src of SOURCES[o.timeframe]) {
+      if (!isCurrent()) return;
+      const e = cacheEntry(o.query, SP[src]);
+      addVideos(e.videos); // whatever is cached already
+      try {
+        await fillEntry(e, cfg, o.query, SP[src], o.targetPages, isCurrent, vids => {
+          if (isCurrent()) addVideos(vids);
+        });
+        // Pages another timeframe loaded into this search while we waited.
+        if (isCurrent()) addVideos(e.videos);
+      } catch (err) {
+        if (isCurrent()) o.error = err;
+        if (err instanceof ThrottledError) break;
+      }
     }
+    if (!isCurrent()) return;
+    o.loading = false;
+    o.done = true;
+    o.moreAvailable = !(o.error instanceof ThrottledError) &&
+      SOURCES[o.timeframe].some(src => !cacheEntry(o.query, SP[src]).done);
+    if (o.error instanceof ThrottledError) scheduleUpdate(); // fall back to YouTube's list
+    renderOwnList();
+    renderBar();
+  }
+
+  function loadMoreOwn() {
+    if (!own || own.loading) return;
+    own.targetPages += PAGES_PER_STEP;
+    loadOwn();
   }
 
   function addVideos(list) {
@@ -722,7 +815,9 @@
         empty.className = 'ytfix-empty';
         el.append(empty);
       }
-      empty.textContent = own.error
+      empty.textContent = own.error instanceof ThrottledError
+        ? 'YouTube asked for fewer requests. Background searches are paused for 15 minutes.'
+        : own.error
         ? `Couldn't load results from YouTube (${own.error.message}). Choose "Any time" to see YouTube's normal list.`
         : `No videos uploaded in the ${TIMEFRAME_LABEL[own.timeframe]} for this search.` +
           (own.unknownKinds.size ? ` (YouTube also sent results in formats the add-on doesn't read yet: ${[...own.unknownKinds].join(', ')}.)` : '');
@@ -776,7 +871,8 @@
     });
     unblur.classList.add('ytfix-more');
     const more = mk('more', 'Load all results', () => {
-      if (preloading) { cancelPreload(); scheduleUpdate(); } else preload(ALL_PAGES);
+      if (ownListActive()) loadMoreOwn();
+      else if (preloading) { cancelPreload(); scheduleUpdate(); } else preload(ALL_PAGES);
     });
     more.classList.add('ytfix-more');
 
@@ -820,13 +916,27 @@
       status.textContent = 'Loading…';
       return;
     }
-    if (ownMode) {
+    if (ownMode && isBackedOff()) {
       more.hidden = true;
+      const t = new Date(settings.backoffUntil).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      status.textContent = `YouTube asked for fewer requests, so background searches are paused until ${t}. ` +
+        "Showing YouTube's normal list, sorted.";
+      return;
+    }
+    if (ownMode) {
       const n = own ? own.videos.size : 0;
       const label = TIMEFRAME_LABEL[tf];
+      more.textContent = 'Load more results';
+      more.hidden = !own || !own.done || !own.moreAvailable;
       if (!own || !own.done) status.textContent = `${n} from the ${label} so far · searching…`;
-      else status.textContent = `${n} videos from the ${label}, newest first · all results loaded` +
+      else status.textContent = `${n} videos from the ${label}, newest first` +
+        (own.moreAvailable ? ' · more available' : ' · all results loaded') +
         (own.error && n ? ' (some searches failed)' : '');
+      return;
+    }
+    if (isBackedOff()) {
+      more.hidden = true;
+      status.textContent = `${lastStats.total} videos sorted · extra loading paused (YouTube asked for fewer requests)`;
       return;
     }
     more.hidden = !settings.sortEnabled || (exhausted && !preloading);
@@ -854,7 +964,7 @@
   function applyModeChange(before) {
     if (settings.timeframe !== 'any') {
       cancelPreload();
-      startOwnList();
+      if (!isBackedOff()) startOwnList();
     } else {
       own = null;
       ownRun++;
@@ -892,7 +1002,7 @@
     cancelPreload();
     exhausted = false;
     scheduleUpdate();
-    if (!isResultsPage() || ownListActive()) return; // own list starts in update()
+    if (!isResultsPage() || ownListActive() || isBackedOff()) return; // own list starts in update()
     if (uploadDateFilter() > 0 && settings.loadAllWhenFiltered) {
       preload(ALL_PAGES); // YouTube's own time filter is on: load everything
     } else if (settings.sortEnabled && settings.preloadPages > 0) {

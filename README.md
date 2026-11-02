@@ -21,10 +21,23 @@ same internal search API the YouTube page uses:
 | Today     | last-hour + Today filters                    | 23 hours ago        |
 | This week | last-hour + Today + This week filters        | 6 days ago          |
 
-It loads every page of each search, removes duplicates, drops anything
-outside the timeframe, and shows one newest-first list in place of YouTube's.
-So all three buttons have the same freshest videos at the top, and the longer
-timeframes extend the list further back.
+It loads the first 5 pages of each search (about 100 results), removes
+duplicates, drops anything outside the timeframe, and shows one newest-first
+list in place of YouTube's. So all three buttons have the same freshest videos
+at the top, and the longer timeframes extend the list further back. Click
+**Load more results** to fetch 5 more pages of each search.
+
+The background searches are signed in as you, like YouTube's own page, so
+age-restricted results are included if your account can see them. Thumbnails
+YouTube blurs stay blurred until you click **Unblur thumbnails**.
+
+#### Keeping the request count low
+- Requests are at least half a second apart, about the pace of scrolling.
+- Results are reused for 10 minutes. Switching between Last hour, Today and
+  This week on the same search only fetches what's new.
+- If YouTube answers "too many requests" (or shows its "unusual traffic"
+  page), all background searches pause for 15 minutes, in every tab. Until
+  then you get YouTube's normal list, sorted newest first.
 
 The timeframe you pick stays selected for new searches until you choose
 **Any time** (or **Relevance**).
@@ -41,6 +54,12 @@ you use YouTube's own *Filters → Upload date* menu, every result is loaded.
 
 Dates are read in English, German, Spanish, Portuguese, French, Italian and
 Dutch.
+
+### Privacy
+Everything stays between your browser and YouTube. There are no other
+servers and no analytics. Only your settings are stored. Signing the
+background searches uses your YouTube sign-in cookie the same way
+YouTube's page does. It is never saved or sent anywhere except YouTube.
 
 ### Limitations
 - The add-on can only show what YouTube's search returns. Brand-new uploads
