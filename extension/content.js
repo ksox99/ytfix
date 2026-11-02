@@ -679,7 +679,19 @@
     try { await e.busy; } finally { e.busy = null; }
   }
 
+  // Search terms whose background searches come back empty (typically
+  // sign-in-only / mature terms) but whose normal results page works. Later
+  // searches for the same term go straight to the results page.
+  const pageFirstQueries = new Set();
+
+  async function pageSearch(query, params, shorts) {
+    const data = await resultsPageData(query, params);
+    return data ? parseFirstPage(data, shorts) : { videos: [], token: null };
+  }
+
   async function firstPage(cfg, query, params, shorts) {
+    if (pageFirstQueries.has(query)) return pageSearch(query, params, shorts);
+
     let page = { videos: [], token: null };
     let apiError = null;
     try {
@@ -688,15 +700,15 @@
       if (err instanceof ThrottledError) throw err;
       apiError = err;
     }
+    // Shorts searches are often legitimately empty, so only regular searches
+    // test whether the results page has what the background search didn't.
     if (page.videos.length === 0 && !shorts) {
-      // Nothing from the API (for example, sign-in-only results): try the normal results page.
-      // Not for Shorts searches, which are often empty anyway.
       try {
         await pace();
-        const data = await resultsPageData(query, params);
-        if (data) {
-          const fromPage = parseFirstPage(data, shorts);
-          if (fromPage.videos.length || fromPage.token) page = fromPage;
+        const fromPage = await pageSearch(query, params, false);
+        if (fromPage.videos.length || fromPage.token) {
+          page = fromPage;
+          if (fromPage.videos.length) pageFirstQueries.add(query);
         }
       } catch (err) {
         if (err instanceof ThrottledError || apiError) throw err instanceof ThrottledError ? err : apiError;
@@ -705,6 +717,7 @@
     }
     return page;
   }
+
 
   // ---- The own list for the current query + timeframe ----
   let own = null;
